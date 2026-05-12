@@ -1,6 +1,8 @@
 package noid
 
 import "core:fmt"
+import "core:os"
+import "core:strings"
 import "core:math"
 import "core:math/linalg"
 import "core:math/rand"
@@ -23,43 +25,45 @@ BLOCK_WIDTH :: (SCREEN_SIZE_X - SIDEBAR_WIDTH)/NUM_BLOCKS_X
 BLOCK_HEIGHT :: 15
 
 Block_Color :: enum {
-	Yellow,
-	Green,
-	Orange,
-	Red,
+  Empty,
+  White,
+  Cyan,
+  Green,
+  Yellow,
+  Red,
   Pink,
-}
-
-row_colors := [NUM_BLOCKS_Y]Block_Color {
-	.Red,
-	.Orange,
-  .Pink,
-	.Green,
-	.Yellow,
-	.Red,
-	.Orange,
-  .Pink,
-	.Green,
-	.Yellow,
+  Orange,
+  Steel,
+  Brass,
 }
 
 block_color_values := [Block_Color]rl.Color {
-	.Yellow = {253, 249, 150, 255},
-	.Green  = {180, 245, 190, 255},
-	.Orange = {170, 120, 250, 255},
-	.Red    = {250, 90, 85, 255},
-  .Pink   = {250, 90, 250, 255},
+  .Empty = rl.Color {0,0,0,0},
+  .White = rl.WHITE,
+  .Cyan = rl.BLUE,
+  .Green = rl.GREEN,
+  .Yellow = rl.YELLOW,
+  .Red = rl.RED,
+  .Pink = rl.PINK,
+  .Orange = rl.ORANGE,
+  .Steel = rl.GRAY,
+  .Brass = rl.GOLD,
 }
 
 block_color_score := [Block_Color]int {
-	.Yellow = 2,
-	.Green  = 4,
-	.Orange = 6,
-	.Red    = 8,
-  .Pink   = 10,
+  .Empty = 0,
+  .White = 1,
+  .Cyan = 2,
+  .Green = 4,
+  .Yellow = 6,
+  .Red = 8,
+  .Pink = 10,
+  .Orange = 20,
+  .Steel = 50,
+  .Brass = 100,
 }
 
-blocks: [NUM_BLOCKS_X][NUM_BLOCKS_Y]bool
+blocks: [NUM_BLOCKS_X][NUM_BLOCKS_Y]u8
 paddle_pos_x: f32
 ball_pos: rl.Vector2
 ball_dir: rl.Vector2
@@ -79,11 +83,42 @@ restart :: proc() {
 	game_over = false
 	score = 0
 
-	for x in 0 ..< NUM_BLOCKS_X {
-		for y in 0 ..< NUM_BLOCKS_Y {
-			blocks[x][y] = true
-		}
-	}
+  data, err := os.read_entire_file("levels/level1.txt", context.allocator)
+  defer delete(data, context.allocator)
+
+  if err != nil {
+    for x in 0 ..< NUM_BLOCKS_X {
+      for y in 0 ..< NUM_BLOCKS_Y {
+        blocks[x][y] = 1
+      }
+    }
+  } else {
+    y := 0
+    it := string(data)
+    for row in strings.split_lines_iterator(&it) {
+      assert(len(row) == NUM_BLOCKS_X)
+      for x in 0..< NUM_BLOCKS_X {
+        blocks[x][y] = char_to_block_id(row[x])
+      }
+      y += 1
+    }
+    assert(y == NUM_BLOCKS_Y)
+  }
+}
+
+char_to_block_id :: proc(char: u8) -> u8 {
+  switch char {
+  case 'W': return u8(Block_Color.White)
+  case 'C': return u8(Block_Color.Cyan)
+  case 'G': return u8(Block_Color.Green)
+  case 'Y': return u8(Block_Color.Yellow)
+  case 'R': return u8(Block_Color.Red)
+  case 'P': return u8(Block_Color.Pink)
+  case 'O': return u8(Block_Color.Orange)
+  case 'S': return u8(Block_Color.Steel)
+  case 'B': return u8(Block_Color.Brass)
+  case: return u8(Block_Color.Empty)
+  }
 }
 
 reflect :: proc(dir, normal: rl.Vector2) -> rl.Vector2 {
@@ -105,7 +140,7 @@ block_exists :: proc(x, y: int) -> bool {
 		return false
 	}
 
-	return blocks[x][y]
+	return blocks[x][y] > 0
 }
 
 main :: proc() {
@@ -113,7 +148,7 @@ main :: proc() {
 	rl.InitWindow(SCREEN_SIZE_X*2, SCREEN_SIZE_Y*2, "noid")
 	rl.InitAudioDevice()
 	rl.SetTargetFPS(500)
-  rl.HideCursor()
+  rl.DisableCursor()
 
 	ball_texture := rl.LoadTexture("assets/ball.png")
 	paddle_texture := rl.LoadTexture("assets/paddle.png")
@@ -175,7 +210,7 @@ main :: proc() {
 				rl.PlaySound(game_over_sound)
 			}
 
-      mouse_dx := rl.GetMouseDelta().x
+      mouse_dx := rl.GetMouseDelta().x * 0.5
       if abs(mouse_dx) > 0.1 {
         paddle_pos_x += mouse_dx
       }
@@ -196,7 +231,7 @@ main :: proc() {
 
 			block_x_loop: for x in 0 ..< NUM_BLOCKS_X {
 				for y in 0 ..< NUM_BLOCKS_Y {
-					if blocks[x][y] == false {
+					if blocks[x][y] == 0 {
 						continue
 					}
 
@@ -233,9 +268,8 @@ main :: proc() {
 							ball_dir = reflect(ball_dir, collision_normal)
 						}
 
-						blocks[x][y] = false
-						row_color := row_colors[y]
-						score += block_color_score[row_color]
+						score += block_color_score[Block_Color(blocks[x][y])]
+						blocks[x][y] = 0
 						rl.SetSoundPitch(hit_block_sound, rand.float32_range(0.8, 1.2))
 						rl.PlaySound(hit_block_sound)
 						break block_x_loop
@@ -266,7 +300,7 @@ main :: proc() {
 
 		for x in 0 ..< NUM_BLOCKS_X {
 			for y in 0 ..< NUM_BLOCKS_Y {
-				if blocks[x][y] == false {
+				if blocks[x][y] == 0 {
 					continue
 				}
 
@@ -276,7 +310,7 @@ main :: proc() {
 				bottom_left := rl.Vector2{block_rect.x, block_rect.y + block_rect.height}
 				bottom_right := rl.Vector2 {block_rect.x + block_rect.width, block_rect.y + block_rect.height}
 
-				rl.DrawRectangleRec(block_rect, block_color_values[row_colors[y]])
+				rl.DrawRectangleRec(block_rect, block_color_values[Block_Color(blocks[x][y])])
 				rl.DrawLineEx(top_left, top_right, 2, {255, 255, 150, 100})
 				rl.DrawLineEx(top_left, bottom_left, 2, {255, 255, 150, 100})
 				rl.DrawLineEx(top_right, bottom_right, 2, {0, 0, 50, 100})
