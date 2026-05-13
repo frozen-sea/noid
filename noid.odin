@@ -16,7 +16,7 @@ LEFT_WALL_X :: WALL_THICKNESS
 RIGHT_WALL_X :: SCREEN_SIZE_X - SIDEBAR_WIDTH - WALL_THICKNESS
 TOP_WALL_Y :: WALL_THICKNESS
 PLAY_AREA_WIDTH :: RIGHT_WALL_X - LEFT_WALL_X // Must be evenly divisible by NUM_BLOCKS_X
-PADDLE_WIDTH :: 50
+DEFAULT_PADDLE_WIDTH :: 50
 PADDLE_HEIGHT :: 6
 PADDLE_POS_Y :: SCREEN_SIZE_Y - 50
 BALL_SPEED :: 250
@@ -29,6 +29,8 @@ BLOCK_HEIGHT :: 15
 EXTRA_LIFE_SCORE :: 2500
 PHYSICS_TICK_RATE :: 120
 MOUSE_SENSITIVITY :: 50 // 0-100
+POWERUP_SPEED :: 100
+POWERUP_SIZE :: 5
 
 Block_Color :: enum u8 {
 	Empty,
@@ -75,7 +77,36 @@ block_color_score := [Block_Color]int {
 	.Adamantium   = 25,
 }
 
+Powerup_Type :: enum u8 {
+  Barrier,
+  Catch,
+  Duplicate,
+  Enlarge,
+  Laser,
+  Slow,
+  Pierce,
+}
+
+Powerup :: struct {
+  type: Powerup_Type,
+  pos: rl.Vector2,
+  color: rl.Color,
+}
+
+powerup_letter := [Powerup_Type]u8 {
+  .Barrier = 'B',
+  .Catch = 'C',
+  .Duplicate = 'D',
+  .Enlarge = 'E',
+  .Laser = 'L',
+  .Slow = 'S',
+  .Pierce = 'P',
+}
+
 blocks: [NUM_BLOCKS_X][NUM_BLOCKS_Y]u8
+falling_powerups: [dynamic; 8]Powerup
+active_powerups: [Powerup_Type]bool
+paddle_width: f32
 paddle_pos_x: f32
 ball_pos: rl.Vector2
 ball_dir: rl.Vector2
@@ -92,11 +123,14 @@ chapter: int = 1
 level: int = 2
 
 reset_paddle :: proc() {
-	paddle_pos_x = PLAY_AREA_WIDTH / 2 - PADDLE_WIDTH / 2
+  paddle_width = DEFAULT_PADDLE_WIDTH
+	paddle_pos_x = PLAY_AREA_WIDTH / 2 - paddle_width / 2
 	previous_paddle_pos_x = paddle_pos_x
 	ball_pos = {PLAY_AREA_WIDTH / 2, BALL_START_Y}
 	previous_ball_pos = ball_pos
 	started = false
+  clear(&falling_powerups)
+  active_powerups = {}
 }
 
 load_level :: proc(new_chapter, new_level: int) {
@@ -169,6 +203,10 @@ char_to_block_id :: proc(char: u8) -> u8 {
 	}
 }
 
+char_to_cstring :: proc(ch: u8) -> cstring {
+  return fmt.ctprintf("%c", ch)
+}
+
 reflect :: proc(dir, normal: rl.Vector2) -> rl.Vector2 {
 	new_direction := linalg.reflect(dir, linalg.normalize(normal))
 	return linalg.normalize(new_direction)
@@ -195,6 +233,19 @@ block_exists :: proc(x, y: int) -> bool {
 	return blocks[x][y] > 0
 }
 
+spawn_powerup :: proc(x, y: f32) {
+  append(&falling_powerups, Powerup {.Enlarge, rl.Vector2 {x, y}, rl.BEIGE})
+}
+
+activate_powerup :: proc(type: Powerup_Type) {
+  active_powerups[type] = true
+  #partial switch type {
+  case .Enlarge: {
+    paddle_width = DEFAULT_PADDLE_WIDTH * 2
+  }
+  }
+}
+
 main :: proc() {
 	rl.SetConfigFlags({.VSYNC_HINT})
 	rl.InitWindow(SCREEN_SIZE_X * 2, SCREEN_SIZE_Y * 2, "noid")
@@ -217,14 +268,14 @@ main :: proc() {
 
 		if !started {
 			ball_pos = {
-				PLAY_AREA_WIDTH / 2 + f32(math.cos(rl.GetTime()) * PLAY_AREA_WIDTH / 2.5),
+				LEFT_WALL_X + PLAY_AREA_WIDTH / 2 + f32(math.cos(rl.GetTime()) * PLAY_AREA_WIDTH / 2.5),
 				BALL_START_Y,
 			}
 
 			previous_ball_pos = ball_pos
 
 			if rl.IsMouseButtonPressed(.LEFT) {
-				paddle_middle := rl.Vector2{paddle_pos_x + PADDLE_WIDTH / 2, PADDLE_POS_Y}
+				paddle_middle := rl.Vector2{paddle_pos_x + paddle_width / 2, PADDLE_POS_Y}
 				ball_to_paddle := paddle_middle - ball_pos
 				ball_dir = linalg.normalize0(ball_to_paddle)
 				started = true
@@ -282,12 +333,11 @@ main :: proc() {
 				paddle_pos_x += mouse_dx
 			}
 
-			paddle_pos_x = clamp(paddle_pos_x, LEFT_WALL_X, RIGHT_WALL_X - PADDLE_WIDTH)
-
-			paddle_rect := rl.Rectangle{paddle_pos_x, PADDLE_POS_Y, PADDLE_WIDTH, PADDLE_HEIGHT}
+			paddle_pos_x = clamp(paddle_pos_x, LEFT_WALL_X, RIGHT_WALL_X - paddle_width)
 
 			// NOTE: Collision with paddle is a special snowflake that ignores incoming direction
 			// and chooses outgoing direction based on where the ball hits the paddle.
+			paddle_rect := rl.Rectangle{paddle_pos_x, PADDLE_POS_Y, paddle_width, PADDLE_HEIGHT}
 			if rl.CheckCollisionCircleRec(ball_pos, BALL_RADIUS, paddle_rect) &&
 			   ball_pos.y <= (paddle_rect.y + paddle_rect.height / 2) {
 				hit_pos_x := linalg.unlerp(
@@ -312,21 +362,23 @@ main :: proc() {
 					if rl.CheckCollisionCircleRec(ball_pos, BALL_RADIUS, block_rect) {
 						collision_normal: rl.Vector2
 
-						// TODO: Resolve this so that we only ever collide with one edge
+						// TODO: Resolve this so that we only ever collide once and with the correct edge
 						if previous_ball_pos.y < block_rect.y {
 							collision_normal += {0, -1}
-						} else if previous_ball_pos.y > block_rect.y + block_rect.height {
+						} 
+            if previous_ball_pos.y > block_rect.y + block_rect.height {
 							collision_normal += {0, 1}
-						} else if previous_ball_pos.x < block_rect.x {
+						} 
+            if previous_ball_pos.x < block_rect.x {
 							collision_normal += {-1, 0}
-						} else if previous_ball_pos.x > block_rect.x + block_rect.width {
+						} 
+            if previous_ball_pos.x > block_rect.x + block_rect.width {
 							collision_normal += {1, 0}
 						}
 
 						if block_exists(x + int(collision_normal.x), y) {
 							collision_normal.x = 0
 						}
-
 						if block_exists(x, y + int(collision_normal.y)) {
 							collision_normal.y = 0
 						}
@@ -348,6 +400,7 @@ main :: proc() {
 							{
 								blocks[x][y] = 0
 								blocks_left -= 1
+                spawn_powerup(block_rect.x + block_rect.width/2, block_rect.y + block_rect.height/2)
 							}
 						}
 
@@ -359,9 +412,25 @@ main :: proc() {
 				}
 			}
 
+      for i := len(falling_powerups) - 1; i >= 0; i -= 1 {
+        powerup := &falling_powerups[i]
+        powerup.pos.y += POWERUP_SPEED * DT
+        powerup_rect := rl.Rectangle {
+          powerup.pos.x - POWERUP_SIZE, powerup.pos.y - POWERUP_SIZE,
+          POWERUP_SIZE*2, POWERUP_SIZE*2
+        }
+        if rl.CheckCollisionRecs(paddle_rect, powerup_rect) {
+          activate_powerup(powerup.type)
+          ordered_remove(&falling_powerups, i)
+        } else if powerup_rect.y > SCREEN_SIZE_Y {
+          ordered_remove(&falling_powerups, i)
+        }
+      }
+
 			accumulated_time -= DT
 		}
 
+    // Clear out the leftover time
 		blend := accumulated_time / DT
 		ball_render_pos := math.lerp(previous_ball_pos, ball_pos, blend)
 		paddle_render_pos_x := math.lerp(previous_paddle_pos_x, paddle_pos_x, blend)
@@ -375,11 +444,11 @@ main :: proc() {
 
 		rl.BeginMode2D(camera)
 
-		rl.DrawRectangleRec({0, 0, WALL_THICKNESS, SCREEN_SIZE_Y}, rl.GRAY)
-		rl.DrawRectangleRec({RIGHT_WALL_X, 0, WALL_THICKNESS, SCREEN_SIZE_Y}, rl.GRAY)
-		rl.DrawRectangleRec({0, 0, SCREEN_SIZE_X, WALL_THICKNESS}, rl.GRAY)
+		rl.DrawRectangleRec({0,            0, WALL_THICKNESS, SCREEN_SIZE_Y},  rl.GRAY)
+		rl.DrawRectangleRec({RIGHT_WALL_X, 0, WALL_THICKNESS, SCREEN_SIZE_Y},  rl.GRAY)
+		rl.DrawRectangleRec({0,            0, SCREEN_SIZE_X,  WALL_THICKNESS}, rl.GRAY)
 
-		rl.DrawTextureV(paddle_texture, {paddle_render_pos_x, PADDLE_POS_Y}, rl.WHITE)
+		rl.DrawTextureEx(paddle_texture, {paddle_render_pos_x, PADDLE_POS_Y}, 0, paddle_width/DEFAULT_PADDLE_WIDTH, rl.WHITE)
 		rl.DrawTextureV(ball_texture, ball_render_pos - {BALL_RADIUS, BALL_RADIUS}, rl.WHITE)
 
 		for x in 0 ..< NUM_BLOCKS_X {
@@ -405,32 +474,56 @@ main :: proc() {
 			}
 		}
 
-		left_offset: i32 = PLAY_AREA_WIDTH + 15
-		top_offset: i32 = 15
-		font_size: i32 = 20
+    for powerup in falling_powerups {
+      powerup_rect := rl.Rectangle {
+        powerup.pos.x - POWERUP_SIZE, powerup.pos.y - POWERUP_SIZE,
+        POWERUP_SIZE*2, POWERUP_SIZE*2
+      }
 
-		rl.DrawText("SCORE", left_offset, top_offset, font_size, rl.WHITE)
+      top_left := rl.Vector2{powerup_rect.x, powerup_rect.y}
+      top_right := rl.Vector2{powerup_rect.x + powerup_rect.width, powerup_rect.y}
+      bottom_left := rl.Vector2{powerup_rect.x, powerup_rect.y + powerup_rect.height}
+      bottom_right := rl.Vector2 {
+        powerup_rect.x + powerup_rect.width,
+        powerup_rect.y + powerup_rect.height,
+      }
+
+      rl.DrawRectangleRec(powerup_rect, powerup.color)
+      rl.DrawLineEx(top_left, top_right, 1, {255, 255, 150, 100})
+      rl.DrawLineEx(top_left, bottom_left, 1, {255, 255, 150, 100})
+      rl.DrawLineEx(top_right, bottom_right, 1, {0, 0, 50, 100})
+      rl.DrawLineEx(bottom_left, bottom_right, 1, {0, 0, 50, 100})
+      cstr := char_to_cstring(powerup_letter[powerup.type])
+      rl.DrawText(cstr, i32(top_left.x) + 2, i32(top_left.y) + 1, 3, rl.WHITE)
+    }
+
+		left_offset: i32 = RIGHT_WALL_X + 20
+		top_offset: i32 = 20
+		TITLE_SIZE :: 20
+    VALUE_SIZE :: 15
+
+		rl.DrawText("SCORE", left_offset, top_offset, TITLE_SIZE, rl.WHITE)
 		top_offset += 20
 		score_text := fmt.ctprint(score)
-		rl.DrawText(score_text, left_offset, top_offset, font_size, rl.WHITE)
+		rl.DrawText(score_text, left_offset, top_offset, VALUE_SIZE, rl.WHITE)
 		top_offset += 40
 
-		rl.DrawText("EXTRA", left_offset, top_offset, font_size, rl.WHITE)
+		rl.DrawText("EXTRA", left_offset, top_offset, TITLE_SIZE, rl.WHITE)
 		top_offset += 20
 		extra_text := fmt.ctprint(extra_life)
-		rl.DrawText(extra_text, left_offset, top_offset, font_size, rl.WHITE)
+		rl.DrawText(extra_text, left_offset, top_offset, VALUE_SIZE, rl.WHITE)
 		top_offset += 40
 
-		rl.DrawText("LIVES", left_offset, top_offset, font_size, rl.WHITE)
+		rl.DrawText("LIVES", left_offset, top_offset, TITLE_SIZE, rl.WHITE)
 		top_offset += 20
 		lives_text := fmt.ctprint(lives)
-		rl.DrawText(lives_text, left_offset, top_offset, font_size, rl.WHITE)
+		rl.DrawText(lives_text, left_offset, top_offset, VALUE_SIZE, rl.WHITE)
 		top_offset += 40
 
-		rl.DrawText("LEVEL", left_offset, top_offset, font_size, rl.WHITE)
+		rl.DrawText("LEVEL", left_offset, top_offset, TITLE_SIZE, rl.WHITE)
 		top_offset += 20
 		level_text := fmt.ctprintf("%d-%d", chapter, level)
-		rl.DrawText(level_text, left_offset, top_offset, font_size, rl.WHITE)
+		rl.DrawText(level_text, left_offset, top_offset, VALUE_SIZE, rl.WHITE)
 		top_offset += 40
 
 		if !started {
@@ -438,7 +531,7 @@ main :: proc() {
 			start_text_width := rl.MeasureText(start_text, 15)
 			rl.DrawText(
 				start_text,
-				PLAY_AREA_WIDTH / 2 - start_text_width / 2,
+				LEFT_WALL_X + PLAY_AREA_WIDTH / 2 - start_text_width / 2,
 				BALL_START_Y - 30,
 				15,
 				rl.WHITE,
@@ -450,7 +543,7 @@ main :: proc() {
 			game_over_text_width := rl.MeasureText(game_over_text, 15)
 			rl.DrawText(
 				game_over_text,
-				PLAY_AREA_WIDTH / 2 - game_over_text_width / 2,
+				LEFT_WALL_X + PLAY_AREA_WIDTH / 2 - game_over_text_width / 2,
 				BALL_START_Y - 30,
 				15,
 				rl.WHITE,
