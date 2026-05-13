@@ -10,8 +10,12 @@ import rl "vendor:raylib"
 
 SCREEN_SIZE_X :: 512
 SCREEN_SIZE_Y :: 448
-SIDEBAR_WIDTH :: 132
-PLAY_AREA_WIDTH :: SCREEN_SIZE_X - SIDEBAR_WIDTH
+SIDEBAR_WIDTH :: 102
+WALL_THICKNESS :: 5
+LEFT_WALL_X :: WALL_THICKNESS
+RIGHT_WALL_X :: SCREEN_SIZE_X - SIDEBAR_WIDTH - WALL_THICKNESS
+TOP_WALL_Y :: WALL_THICKNESS
+PLAY_AREA_WIDTH :: RIGHT_WALL_X - LEFT_WALL_X // Must be evenly divisible by NUM_BLOCKS_X
 PADDLE_WIDTH :: 50
 PADDLE_HEIGHT :: 6
 PADDLE_POS_Y :: SCREEN_SIZE_Y - 50
@@ -20,7 +24,7 @@ BALL_RADIUS :: 4
 BALL_START_Y :: SCREEN_SIZE_Y / 3 * 2
 NUM_BLOCKS_X :: 10
 NUM_BLOCKS_Y :: 16
-BLOCK_WIDTH :: (SCREEN_SIZE_X - SIDEBAR_WIDTH) / NUM_BLOCKS_X
+BLOCK_WIDTH :: PLAY_AREA_WIDTH / NUM_BLOCKS_X
 BLOCK_HEIGHT :: 15
 EXTRA_LIFE_SCORE :: 2500
 PHYSICS_TICK_RATE :: 120
@@ -135,7 +139,6 @@ restart :: proc() {
 	score = 0
 	extra_life = EXTRA_LIFE_SCORE
 	lives = 2
-
 	load_level(1, 1)
 }
 
@@ -172,12 +175,16 @@ reflect :: proc(dir, normal: rl.Vector2) -> rl.Vector2 {
 }
 
 negate :: proc(dir: rl.Vector2) -> rl.Vector2 {
-	new_direction := dir * -1
-	return linalg.normalize(new_direction)
+	return dir * -1
 }
 
 calc_block_rect :: proc(x, y: int) -> rl.Rectangle {
-	return {f32(x * BLOCK_WIDTH), f32(BLOCK_HEIGHT + y * BLOCK_HEIGHT), BLOCK_WIDTH, BLOCK_HEIGHT}
+	return {
+		f32(LEFT_WALL_X + x * BLOCK_WIDTH),
+		f32(TOP_WALL_Y + y * BLOCK_HEIGHT),
+		BLOCK_WIDTH,
+		BLOCK_HEIGHT,
+	}
 }
 
 block_exists :: proc(x, y: int) -> bool {
@@ -198,7 +205,7 @@ main :: proc() {
 	ball_texture := rl.LoadTexture("assets/ball.png")
 	paddle_texture := rl.LoadTexture("assets/paddle.png")
 	hit_block_sound := rl.LoadSound("assets/hit_block.wav")
-	hit_paddle_sound := rl.LoadSound("assets/hit_paddle_soundddle.wav")
+	hit_paddle_sound := rl.LoadSound("assets/hit_paddle.wav")
 	game_over_sound := rl.LoadSound("assets/game_over.wav")
 
 	restart()
@@ -245,22 +252,22 @@ main :: proc() {
 			previous_paddle_pos_x = paddle_pos_x
 			ball_pos += ball_dir * BALL_SPEED * DT
 
-			if ball_pos.x + BALL_RADIUS > PLAY_AREA_WIDTH {
-				ball_pos.x = PLAY_AREA_WIDTH - BALL_RADIUS
+			if ball_pos.x + BALL_RADIUS > RIGHT_WALL_X {
+				ball_pos.x = RIGHT_WALL_X - BALL_RADIUS
 				ball_dir = reflect(ball_dir, {-1, 0})
 			}
 
-			if ball_pos.x - BALL_RADIUS < 0 {
-				ball_pos.x = BALL_RADIUS
+			if ball_pos.x - BALL_RADIUS < LEFT_WALL_X {
+				ball_pos.x = LEFT_WALL_X + BALL_RADIUS
 				ball_dir = reflect(ball_dir, {1, 0})
 			}
 
-			if ball_pos.y - BALL_RADIUS < 0 {
-				ball_pos.y = BALL_RADIUS
+			if ball_pos.y - BALL_RADIUS < TOP_WALL_Y {
+				ball_pos.y = TOP_WALL_Y + BALL_RADIUS
 				ball_dir = reflect(ball_dir, {0, 1})
 			}
 
-			if ball_pos.y > SCREEN_SIZE_Y + BALL_RADIUS * 6 {
+			if ball_pos.y > SCREEN_SIZE_Y + BALL_RADIUS * 5 {
 				if !game_over && lives == 0 {
 					game_over = true
 					rl.PlaySound(game_over_sound)
@@ -275,7 +282,7 @@ main :: proc() {
 				paddle_pos_x += mouse_dx
 			}
 
-			paddle_pos_x = clamp(paddle_pos_x, 0, PLAY_AREA_WIDTH - PADDLE_WIDTH)
+			paddle_pos_x = clamp(paddle_pos_x, LEFT_WALL_X, RIGHT_WALL_X - PADDLE_WIDTH)
 
 			paddle_rect := rl.Rectangle{paddle_pos_x, PADDLE_POS_Y, PADDLE_WIDTH, PADDLE_HEIGHT}
 
@@ -368,7 +375,9 @@ main :: proc() {
 
 		rl.BeginMode2D(camera)
 
-		rl.DrawRectangleRec({PLAY_AREA_WIDTH + 0.5, 0, 5, SCREEN_SIZE_Y}, rl.GRAY)
+		rl.DrawRectangleRec({0, 0, WALL_THICKNESS, SCREEN_SIZE_Y}, rl.GRAY)
+		rl.DrawRectangleRec({RIGHT_WALL_X, 0, WALL_THICKNESS, SCREEN_SIZE_Y}, rl.GRAY)
+		rl.DrawRectangleRec({0, 0, SCREEN_SIZE_X, WALL_THICKNESS}, rl.GRAY)
 
 		rl.DrawTextureV(paddle_texture, {paddle_render_pos_x, PADDLE_POS_Y}, rl.WHITE)
 		rl.DrawTextureV(ball_texture, ball_render_pos - {BALL_RADIUS, BALL_RADIUS}, rl.WHITE)
@@ -397,7 +406,7 @@ main :: proc() {
 		}
 
 		left_offset: i32 = PLAY_AREA_WIDTH + 15
-		top_offset: i32 = 10
+		top_offset: i32 = 15
 		font_size: i32 = 20
 
 		rl.DrawText("SCORE", left_offset, top_offset, font_size, rl.WHITE)
