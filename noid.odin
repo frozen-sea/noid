@@ -20,47 +20,54 @@ BALL_SPEED :: 200
 BALL_RADIUS :: 4
 BALL_START_Y :: SCREEN_SIZE_Y/3*2
 NUM_BLOCKS_X :: 10
-NUM_BLOCKS_Y :: 10
+NUM_BLOCKS_Y :: 16
 BLOCK_WIDTH :: (SCREEN_SIZE_X - SIDEBAR_WIDTH)/NUM_BLOCKS_X
 BLOCK_HEIGHT :: 15
+EXTRA_LIFE_SCORE :: 3000
 
 Block_Color :: enum {
   Empty,
   White,
   Cyan,
+  Blue,
   Green,
   Yellow,
   Red,
   Pink,
   Orange,
   Steel,
-  Brass,
+  DamagedSteel,
+  Adamantium,
 }
 
 block_color_values := [Block_Color]rl.Color {
   .Empty = rl.Color {0,0,0,0},
-  .White = rl.WHITE,
-  .Cyan = rl.BLUE,
-  .Green = rl.GREEN,
+  .White = rl.LIGHTGRAY,
+  .Cyan = rl.SKYBLUE,
+  .Blue = rl.DARKBLUE,
+  .Green = rl.LIME,
   .Yellow = rl.YELLOW,
-  .Red = rl.RED,
+  .Red = rl.MAROON,
   .Pink = rl.PINK,
   .Orange = rl.ORANGE,
   .Steel = rl.GRAY,
-  .Brass = rl.GOLD,
+  .DamagedSteel = rl.DARKGRAY,
+  .Adamantium = rl.GOLD,
 }
 
 block_color_score := [Block_Color]int {
   .Empty = 0,
-  .White = 1,
-  .Cyan = 2,
-  .Green = 4,
-  .Yellow = 6,
-  .Red = 8,
-  .Pink = 10,
-  .Orange = 20,
-  .Steel = 50,
-  .Brass = 100,
+  .White = 10,
+  .Cyan = 20,
+  .Blue = 40,
+  .Green = 60,
+  .Yellow = 80,
+  .Red = 100,
+  .Pink = 150,
+  .Orange = 200,
+  .Steel = 10,
+  .DamagedSteel = 250,
+  .Adamantium = 25,
 }
 
 blocks: [NUM_BLOCKS_X][NUM_BLOCKS_Y]u8
@@ -69,54 +76,78 @@ ball_pos: rl.Vector2
 ball_dir: rl.Vector2
 started: bool
 game_over: bool
+blocks_left: int
 score: int
+extra_life: int
+lives: int
 accumulated_time: f32
 previous_ball_pos: rl.Vector2
 previous_paddle_pos_x: f32
+chapter: int = 1
+level: int = 2
 
-restart :: proc() {
-	paddle_pos_x = PLAY_AREA_WIDTH / 2 - PADDLE_WIDTH / 2
-	previous_paddle_pos_x = paddle_pos_x
-	ball_pos = {PLAY_AREA_WIDTH / 2, BALL_START_Y}
-	previous_ball_pos = ball_pos
-	started = false
-	game_over = false
-	score = 0
+reset_paddle :: proc() {
+  paddle_pos_x = PLAY_AREA_WIDTH / 2 - PADDLE_WIDTH / 2
+  previous_paddle_pos_x = paddle_pos_x
+  ball_pos = {PLAY_AREA_WIDTH / 2, BALL_START_Y}
+  previous_ball_pos = ball_pos
+  started = false
+}
 
-  data, err := os.read_entire_file("levels/level1.txt", context.allocator)
+load_level :: proc(new_chapter, new_level: int) {
+  blocks_left = 0
+  chapter = new_chapter
+  level = new_level
+
+  level_path := fmt.tprintf("levels/%d/%d.txt", chapter, level)
+  data, err := os.read_entire_file(level_path, context.allocator)
   defer delete(data, context.allocator)
 
-  if err != nil {
-    for x in 0 ..< NUM_BLOCKS_X {
-      for y in 0 ..< NUM_BLOCKS_Y {
-        blocks[x][y] = 1
-      }
-    }
-  } else {
+  if err == nil {
     y := 0
     it := string(data)
     for row in strings.split_lines_iterator(&it) {
       assert(len(row) == NUM_BLOCKS_X)
       for x in 0..< NUM_BLOCKS_X {
-        blocks[x][y] = char_to_block_id(row[x])
+        block_id := char_to_block_id(row[x])
+        blocks[x][y] = block_id
+        if block_id > 0 { blocks_left += 1 } // TODO: Don't count Adamantium when they have been made unbreakable
       }
       y += 1
     }
-    assert(y == NUM_BLOCKS_Y)
+  } else {
+    for x in 0 ..< NUM_BLOCKS_X {
+      for y in 0 ..< NUM_BLOCKS_Y {
+        blocks[x][y] = 1
+        blocks_left += 1
+      }
+    }
   }
+
+  reset_paddle()
 }
+
+restart :: proc() {
+	game_over = false
+	score = 0
+  extra_life = EXTRA_LIFE_SCORE
+  lives = 2
+
+  load_level(1, 1)
+ }
 
 char_to_block_id :: proc(char: u8) -> u8 {
   switch char {
   case 'W': return u8(Block_Color.White)
   case 'C': return u8(Block_Color.Cyan)
+  case 'B': return u8(Block_Color.Blue)
   case 'G': return u8(Block_Color.Green)
   case 'Y': return u8(Block_Color.Yellow)
   case 'R': return u8(Block_Color.Red)
   case 'P': return u8(Block_Color.Pink)
   case 'O': return u8(Block_Color.Orange)
   case 'S': return u8(Block_Color.Steel)
-  case 'B': return u8(Block_Color.Brass)
+  case 'A': return u8(Block_Color.Adamantium)
   case: return u8(Block_Color.Empty)
   }
 }
@@ -185,6 +216,16 @@ main :: proc() {
 			accumulated_time += rl.GetFrameTime()
 		}
 
+    if (extra_life <= 0) {
+      extra_life += EXTRA_LIFE_SCORE
+      lives += 1
+    }
+
+    if (blocks_left == 0) {
+      level += 1
+      load_level(chapter, level)
+    }
+
 		for accumulated_time >= DT {
 			previous_ball_pos = ball_pos
 			previous_paddle_pos_x = paddle_pos_x
@@ -205,9 +246,14 @@ main :: proc() {
 				ball_dir = reflect(ball_dir, {0, 1})
 			}
 
-			if !game_over && ball_pos.y > SCREEN_SIZE_Y + BALL_RADIUS * 6 {
-				game_over = true
-				rl.PlaySound(game_over_sound)
+			if ball_pos.y > SCREEN_SIZE_Y + BALL_RADIUS * 6 {
+        if !game_over && lives == 0 {
+          game_over = true
+          rl.PlaySound(game_over_sound)
+        } else {
+          lives -= 1
+          reset_paddle()
+        }
 			}
 
       mouse_dx := rl.GetMouseDelta().x * 0.5
@@ -240,19 +286,14 @@ main :: proc() {
 					if rl.CheckCollisionCircleRec(ball_pos, BALL_RADIUS, block_rect) {
 						collision_normal: rl.Vector2
 
+            // TODO: Resolve this so that we only ever collide with one edge
 						if previous_ball_pos.y < block_rect.y {
 							collision_normal += {0, -1}
-						}
-
-						if previous_ball_pos.y > block_rect.y + block_rect.height {
+						} else if previous_ball_pos.y > block_rect.y + block_rect.height {
 							collision_normal += {0, 1}
-						}
-
-						if previous_ball_pos.x < block_rect.x {
+						} else if previous_ball_pos.x < block_rect.x {
 							collision_normal += {-1, 0}
-						}
-
-						if previous_ball_pos.x > block_rect.x + block_rect.width {
+						} else if previous_ball_pos.x > block_rect.x + block_rect.width {
 							collision_normal += {1, 0}
 						}
 
@@ -268,11 +309,16 @@ main :: proc() {
 							ball_dir = reflect(ball_dir, collision_normal)
 						}
 
-						score += block_color_score[Block_Color(blocks[x][y])]
+            block_score := block_color_score[Block_Color(blocks[x][y])]
+            score += block_score
+            extra_life -= block_score
 						blocks[x][y] = 0
+            blocks_left -= 1
+
 						rl.SetSoundPitch(hit_block_sound, rand.float32_range(0.8, 1.2))
 						rl.PlaySound(hit_block_sound)
-						break block_x_loop
+						
+            break block_x_loop
 					}
 				}
 			}
@@ -311,15 +357,40 @@ main :: proc() {
 				bottom_right := rl.Vector2 {block_rect.x + block_rect.width, block_rect.y + block_rect.height}
 
 				rl.DrawRectangleRec(block_rect, block_color_values[Block_Color(blocks[x][y])])
-				rl.DrawLineEx(top_left, top_right, 2, {255, 255, 150, 100})
-				rl.DrawLineEx(top_left, bottom_left, 2, {255, 255, 150, 100})
-				rl.DrawLineEx(top_right, bottom_right, 2, {0, 0, 50, 100})
-				rl.DrawLineEx(bottom_left - 1, bottom_right - 1, 2, {0, 0, 50, 100})
+				rl.DrawLineEx(top_left, top_right, 1, {255, 255, 150, 100})
+				rl.DrawLineEx(top_left, bottom_left, 1, {255, 255, 150, 100})
+				rl.DrawLineEx(top_right, bottom_right, 1, {0, 0, 50, 100})
+				rl.DrawLineEx(bottom_left, bottom_right, 1, {0, 0, 50, 100})
 			}
 		}
 
+    left_offset: i32 = PLAY_AREA_WIDTH + 15
+    top_offset: i32 = 10
+    font_size: i32 = 20
+
+		rl.DrawText("SCORE", left_offset, top_offset, font_size, rl.WHITE)
+    top_offset += 20
 		score_text := fmt.ctprint(score)
-		rl.DrawText(score_text, PLAY_AREA_WIDTH + 15, 10, 20, rl.WHITE)
+		rl.DrawText(score_text, left_offset, top_offset, font_size, rl.WHITE)
+    top_offset += 40
+
+		rl.DrawText("EXTRA", left_offset, top_offset, font_size, rl.WHITE)
+    top_offset += 20
+		extra_text := fmt.ctprint(extra_life)
+		rl.DrawText(extra_text, left_offset, top_offset, font_size, rl.WHITE)
+    top_offset += 40
+
+    rl.DrawText("LIVES", left_offset, top_offset, font_size, rl.WHITE)
+    top_offset += 20
+		lives_text := fmt.ctprint(lives)
+		rl.DrawText(lives_text, left_offset, top_offset, font_size, rl.WHITE)
+    top_offset += 40
+
+    rl.DrawText("LEVEL", left_offset, top_offset, font_size, rl.WHITE)
+    top_offset += 20
+    level_text := fmt.ctprintf("%d-%d", chapter, level)
+    rl.DrawText(level_text, left_offset, top_offset, font_size, rl.WHITE)
+    top_offset += 40
 
 		if !started {
 			start_text := fmt.ctprint("Start: SPACE")
