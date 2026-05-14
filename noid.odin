@@ -32,6 +32,8 @@ PHYSICS_TICK_RATE :: 120
 MOUSE_SENSITIVITY :: 50 // 0-100
 POWERUP_SPEED :: 100
 POWERUP_SIZE :: 5.25
+DEFAULT_PADDLE_COLOR :: rl.DARKBLUE
+DEFAULT_BALL_COLOR :: rl.WHITE
 
 Block_Color :: enum u8 {
 	Empty,
@@ -112,6 +114,7 @@ paddle_pos_x: f32
 ball_pos: rl.Vector2
 ball_dir: rl.Vector2
 ball_speed: f32
+previous_ball_speed: f32
 ball_offset_x: f32
 game_paused: bool
 game_over: bool
@@ -125,6 +128,8 @@ previous_ball_pos: rl.Vector2
 previous_paddle_pos_x: f32
 chapter: int = 1
 level: int = 2
+paddle_color: rl.Color
+ball_color: rl.Color
 
 move_ball_to_paddle :: proc() {
   ball_pos = {
@@ -145,6 +150,9 @@ ball_hit_paddle :: proc() {
 
 reset_paddle :: proc() {
   waiting_for_launch = true
+  paddle_color = DEFAULT_PADDLE_COLOR
+  ball_color = DEFAULT_BALL_COLOR
+  previous_ball_speed = DEFAULT_BALL_SPEED
   ball_speed = 0
   ball_offset_x = DEFAULT_BALL_OFFSET_X
   paddle_width = DEFAULT_PADDLE_WIDTH
@@ -275,7 +283,7 @@ draw_rect_w_outline :: proc(rect: rl.Rectangle, color: rl.Color) {
 }
 
 spawn_powerup :: proc(x, y: f32) {
-  options : []u8 = {1, 3}
+  options : []u8 = {1, 3, 5}
   type := Powerup_Type(rand.choice(options))
   append(&falling_powerups, Powerup {type, rl.Vector2 {x, y}, rl.BEIGE})
 }
@@ -283,18 +291,35 @@ spawn_powerup :: proc(x, y: f32) {
 activate_powerup :: proc(type: Powerup_Type) {
   #partial switch type {
   case .Enlarge: {
-    if active_powerups[.Enlarge] {break}
+    if active_powerups[.Enlarge] {
+      break
+    }
     paddle_pos_x -= paddle_width * (1 - 1/1.5)
     previous_paddle_pos_x = paddle_pos_x
     paddle_width = DEFAULT_PADDLE_WIDTH * 1.5
-    active_powerups[.Catch] = false
+    if active_powerups[.Catch] {
+      paddle_color = DEFAULT_PADDLE_COLOR
+      waiting_for_launch = false
+      ball_speed = previous_ball_speed
+      active_powerups[.Catch] = false
+    }
   }
   case .Catch: {
+    paddle_color = rl.DARKGREEN
     if active_powerups[.Enlarge] {
       paddle_width = DEFAULT_PADDLE_WIDTH
       paddle_pos_x += paddle_width * (1 - 1/1.5)
       previous_paddle_pos_x = paddle_pos_x
       active_powerups[.Enlarge] = false
+    }
+  }
+  case .Slow: {
+    if active_powerups[.Slow] {
+      ball_speed = DEFAULT_BALL_SPEED
+      ball_color = DEFAULT_BALL_COLOR
+    } else {
+      ball_speed = DEFAULT_BALL_SPEED * 0.75
+      ball_color = rl.GOLD
     }
   }
   }
@@ -390,6 +415,7 @@ main :: proc() {
         ball_hit_paddle()
 
         if active_powerups[.Catch] {
+          previous_ball_speed = ball_speed
           ball_speed = 0
           waiting_for_launch = true
         }
@@ -493,11 +519,13 @@ main :: proc() {
 
 		rl.BeginMode2D(camera)
 
-    draw_rect_w_outline({paddle_render_pos_x, PADDLE_POS_Y, paddle_width, PADDLE_HEIGHT}, rl.DARKBLUE)
+    draw_rect_w_outline({paddle_render_pos_x, PADDLE_POS_Y, paddle_width, PADDLE_HEIGHT}, paddle_color)
     
-    rl.DrawCircleV(ball_render_pos, BALL_RADIUS, rl.GRAY)
-    rl.DrawRing(ball_render_pos, BALL_RADIUS - 1, BALL_RADIUS, -45, 145, 4, rl.DARKGRAY)
-    rl.DrawRing(ball_render_pos, BALL_RADIUS - 1, BALL_RADIUS, -225, -45, 4, rl.WHITE)
+    rl.DrawCircleV(ball_render_pos, BALL_RADIUS, ball_color)
+    darker_color := rl.ColorBrightness(ball_color, -0.5)
+    lighter_color := rl.ColorBrightness(ball_color, 0.5)
+    rl.DrawRing(ball_render_pos, BALL_RADIUS - 1, BALL_RADIUS, -45, 145, 4, darker_color)
+    rl.DrawRing(ball_render_pos, BALL_RADIUS - 1, BALL_RADIUS, -225, -45, 4, lighter_color)
 
 		for x in 0 ..< NUM_BLOCKS_X {
 			for y in 0 ..< NUM_BLOCKS_Y {
@@ -524,9 +552,12 @@ main :: proc() {
       draw_rect_w_outline(powerup_rect, powerup.color)
       x := i32(powerup.pos.x - POWERUP_SIZE + 2)
       y := i32(powerup.pos.y - POWERUP_SIZE + 1)
-      cstr := char_to_cstring(powerup_letter[powerup.type])
-      rl.DrawText(cstr, x+1, y+1, 2, rl.BLACK)
-      rl.DrawText(cstr, x, y, 2, rl.WHITE)
+      str := char_to_cstring(powerup_letter[powerup.type])
+      if powerup.type == .Slow && active_powerups[.Slow] {
+        str = "F"
+      }
+      rl.DrawText(str, x+1, y+1, 2, rl.BLACK)
+      rl.DrawText(str, x, y, 2, rl.WHITE)
     }
 
 		left_offset: i32 = RIGHT_WALL_X + 20
