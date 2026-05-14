@@ -103,7 +103,7 @@ powerup_letter := [Powerup_Type]u8 {
   .Pierce = 'P',
 }
 
-blocks: [NUM_BLOCKS_X][NUM_BLOCKS_Y]u8
+blocks: [NUM_BLOCKS_X][NUM_BLOCKS_Y]Block_Color
 falling_powerups: [dynamic; 8]Powerup
 active_powerups: [Powerup_Type]bool
 paddle_width: f32
@@ -148,9 +148,9 @@ load_level :: proc(new_chapter, new_level: int) {
 		for row in strings.split_lines_iterator(&it) {
 			assert(len(row) == NUM_BLOCKS_X)
 			for x in 0 ..< NUM_BLOCKS_X {
-				block_id := char_to_block_id(row[x])
+				block_id := char_to_block_color(row[x])
 				blocks[x][y] = block_id
-				if block_id != u8(Block_Color.Empty) && block_id != u8(Block_Color.Adamantium) {
+				if block_id != Block_Color.Empty && block_id != Block_Color.Adamantium {
 					blocks_left += 1
 				}
 			}
@@ -159,7 +159,7 @@ load_level :: proc(new_chapter, new_level: int) {
 	} else {
 		for x in 0 ..< NUM_BLOCKS_X {
 			for y in 0 ..< NUM_BLOCKS_Y {
-				blocks[x][y] = 1
+				blocks[x][y] = Block_Color.Empty
 				blocks_left += 1
 			}
 		}
@@ -176,30 +176,30 @@ restart :: proc() {
 	load_level(1, 1)
 }
 
-char_to_block_id :: proc(char: u8) -> u8 {
+char_to_block_color :: proc(char: u8) -> Block_Color {
 	switch char {
 	case 'W':
-		return u8(Block_Color.White)
+		return Block_Color.White
 	case 'C':
-		return u8(Block_Color.Cyan)
+		return Block_Color.Cyan
 	case 'B':
-		return u8(Block_Color.Blue)
+		return Block_Color.Blue
 	case 'G':
-		return u8(Block_Color.Green)
+		return Block_Color.Green
 	case 'Y':
-		return u8(Block_Color.Yellow)
+		return Block_Color.Yellow
 	case 'R':
-		return u8(Block_Color.Red)
+		return Block_Color.Red
 	case 'P':
-		return u8(Block_Color.Pink)
+		return Block_Color.Pink
 	case 'O':
-		return u8(Block_Color.Orange)
+		return Block_Color.Orange
 	case 'S':
-		return u8(Block_Color.Steel)
+		return Block_Color.Steel
 	case 'A':
-		return u8(Block_Color.Adamantium)
+		return Block_Color.Adamantium
 	case:
-		return u8(Block_Color.Empty)
+		return Block_Color.Empty
 	}
 }
 
@@ -230,7 +230,7 @@ block_exists :: proc(x, y: int) -> bool {
 		return false
 	}
 
-	return blocks[x][y] > 0
+	return blocks[x][y] > Block_Color.Empty
 }
 
 spawn_powerup :: proc(x, y: f32) {
@@ -353,7 +353,7 @@ main :: proc() {
 
 			block_x_loop: for x in 0 ..< NUM_BLOCKS_X {
 				for y in 0 ..< NUM_BLOCKS_Y {
-					if blocks[x][y] == 0 {
+					if blocks[x][y] == Block_Color.Empty {
 						continue
 					}
 
@@ -395,10 +395,10 @@ main :: proc() {
 						case Block_Color.Adamantium:
 							break // unbreakable
 						case Block_Color.Steel:
-							blocks[x][y] = u8(Block_Color.DamagedSteel)
+							blocks[x][y] = Block_Color.DamagedSteel
 						case:
 							{
-								blocks[x][y] = 0
+								blocks[x][y] = Block_Color.Empty
 								blocks_left -= 1
                 spawn_powerup(block_rect.x + block_rect.width/2, block_rect.y + block_rect.height/2)
 							}
@@ -453,7 +453,7 @@ main :: proc() {
 
 		for x in 0 ..< NUM_BLOCKS_X {
 			for y in 0 ..< NUM_BLOCKS_Y {
-				if blocks[x][y] == 0 {
+				if blocks[x][y] == Block_Color.Empty {
 					continue
 				}
 
