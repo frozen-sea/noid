@@ -19,7 +19,8 @@ PLAY_AREA_WIDTH :: RIGHT_WALL_X - LEFT_WALL_X // Must be evenly divisible by NUM
 DEFAULT_PADDLE_WIDTH :: 50
 PADDLE_HEIGHT :: 6
 PADDLE_POS_Y :: SCREEN_SIZE_Y - 50
-BALL_SPEED :: 250
+DEFAULT_BALL_SPEED :: 250
+DEFAULT_BALL_OFFSET_X :: DEFAULT_PADDLE_WIDTH * 2 / 3
 BALL_RADIUS :: 4
 BALL_START_Y :: SCREEN_SIZE_Y / 3 * 2
 NUM_BLOCKS_X :: 10
@@ -30,7 +31,7 @@ EXTRA_LIFE_SCORE :: 2500
 PHYSICS_TICK_RATE :: 120
 MOUSE_SENSITIVITY :: 50 // 0-100
 POWERUP_SPEED :: 100
-POWERUP_SIZE :: 5
+POWERUP_SIZE :: 5.25
 
 Block_Color :: enum u8 {
 	Empty,
@@ -110,8 +111,11 @@ paddle_width: f32
 paddle_pos_x: f32
 ball_pos: rl.Vector2
 ball_dir: rl.Vector2
-started: bool
+ball_speed: f32
+ball_offset_x: f32
+game_paused: bool
 game_over: bool
+waiting_for_launch: bool
 blocks_left: int
 score: int
 extra_life: int
@@ -122,15 +126,35 @@ previous_paddle_pos_x: f32
 chapter: int = 1
 level: int = 2
 
+move_ball_to_paddle :: proc() {
+  ball_pos = {
+    paddle_pos_x + ball_offset_x,
+    PADDLE_POS_Y - BALL_RADIUS - 1,
+  }
+}
+
+ball_hit_paddle :: proc() {
+  hit_pos_x := linalg.unlerp(
+    paddle_pos_x,
+    paddle_pos_x + paddle_width,
+    ball_pos.x,
+  )
+  ball_offset_x = paddle_width * hit_pos_x
+  ball_dir = linalg.normalize(rl.Vector2{(hit_pos_x - 0.5) * 3.0, -1})
+}
+
 reset_paddle :: proc() {
+  waiting_for_launch = true
+  ball_speed = 0
+  ball_offset_x = DEFAULT_BALL_OFFSET_X
   paddle_width = DEFAULT_PADDLE_WIDTH
-	paddle_pos_x = PLAY_AREA_WIDTH / 2 - paddle_width / 2
+	paddle_pos_x = LEFT_WALL_X + PLAY_AREA_WIDTH / 2 - paddle_width / 2
 	previous_paddle_pos_x = paddle_pos_x
-	ball_pos = {PLAY_AREA_WIDTH / 2, BALL_START_Y}
-	previous_ball_pos = ball_pos
-	started = false
   clear(&falling_powerups)
   active_powerups = {}
+  move_ball_to_paddle()
+  previous_ball_pos = ball_pos
+  ball_hit_paddle()
 }
 
 load_level :: proc(new_chapter, new_level: int) {
@@ -169,6 +193,7 @@ load_level :: proc(new_chapter, new_level: int) {
 }
 
 restart :: proc() {
+  game_paused = false
 	game_over = false
 	score = 0
 	extra_life = EXTRA_LIFE_SCORE
@@ -233,17 +258,48 @@ block_exists :: proc(x, y: int) -> bool {
 	return blocks[x][y] > Block_Color.Empty
 }
 
+draw_rect_w_outline :: proc(rect: rl.Rectangle, color: rl.Color) {
+  top_left := rl.Vector2{rect.x, rect.y}
+  top_right := rl.Vector2{rect.x + rect.width, rect.y}
+  bottom_left := rl.Vector2{rect.x, rect.y + rect.height}
+  bottom_right := rl.Vector2 {rect.x + rect.width, rect.y + rect.height}
+
+  darker_color := rl.ColorBrightness(color, -0.5)
+  lighter_color := rl.ColorBrightness(color, 0.5)
+
+  rl.DrawRectangleRec(rect, color)
+  rl.DrawLineEx(top_left, top_right, 1, lighter_color)
+  rl.DrawLineEx(top_left, bottom_left, 1, lighter_color)
+  rl.DrawLineEx(top_right, bottom_right, 1, darker_color)
+  rl.DrawLineEx(bottom_left, bottom_right, 1, darker_color)
+}
+
 spawn_powerup :: proc(x, y: f32) {
-  append(&falling_powerups, Powerup {.Enlarge, rl.Vector2 {x, y}, rl.BEIGE})
+  options : []u8 = {1, 3}
+  type := Powerup_Type(rand.choice(options))
+  append(&falling_powerups, Powerup {type, rl.Vector2 {x, y}, rl.BEIGE})
 }
 
 activate_powerup :: proc(type: Powerup_Type) {
-  active_powerups[type] = true
   #partial switch type {
   case .Enlarge: {
-    paddle_width = DEFAULT_PADDLE_WIDTH * 2
+    if active_powerups[.Enlarge] {break}
+    paddle_pos_x -= paddle_width * (1 - 1/1.5)
+    previous_paddle_pos_x = paddle_pos_x
+    paddle_width = DEFAULT_PADDLE_WIDTH * 1.5
+    active_powerups[.Catch] = false
+  }
+  case .Catch: {
+    if active_powerups[.Enlarge] {
+      paddle_width = DEFAULT_PADDLE_WIDTH
+      paddle_pos_x += paddle_width * (1 - 1/1.5)
+      previous_paddle_pos_x = paddle_pos_x
+      active_powerups[.Enlarge] = false
+    }
   }
   }
+
+  active_powerups[type] = true
 }
 
 main :: proc() {
@@ -253,100 +309,90 @@ main :: proc() {
 	rl.SetTargetFPS(500)
 	rl.DisableCursor()
 
-	ball_texture := rl.LoadTexture("assets/ball.png")
-	paddle_texture := rl.LoadTexture("assets/paddle.png")
 	hit_block_sound := rl.LoadSound("assets/hit_block.wav")
 	hit_paddle_sound := rl.LoadSound("assets/hit_paddle.wav")
 	game_over_sound := rl.LoadSound("assets/game_over.wav")
 
 	restart()
 
-	for !rl.WindowShouldClose() {
-		DT :: 1.0 / PHYSICS_TICK_RATE
+  for !rl.WindowShouldClose() {
+    DT :: 1.0 / PHYSICS_TICK_RATE
 
-		if rl.IsKeyPressed(.ESCAPE) {return}
+    if rl.IsKeyPressed(.ESCAPE) {return}
+    
+    if rl.IsMouseButtonPressed(.LEFT) {
+      if game_over {restart()}
+      else if waiting_for_launch {
+        ball_speed = DEFAULT_BALL_SPEED
+        waiting_for_launch = false
+      }
+    }
 
-		if !started {
-			ball_pos = {
-				LEFT_WALL_X + PLAY_AREA_WIDTH / 2 + f32(math.cos(rl.GetTime()) * PLAY_AREA_WIDTH / 2.5),
-				BALL_START_Y,
-			}
+    if !game_paused {
+      accumulated_time += rl.GetFrameTime()
+    }
 
-			previous_ball_pos = ball_pos
+    if (extra_life <= 0) {
+      extra_life += EXTRA_LIFE_SCORE
+      lives += 1
+    }
 
-			if rl.IsMouseButtonPressed(.LEFT) {
-				paddle_middle := rl.Vector2{paddle_pos_x + paddle_width / 2, PADDLE_POS_Y}
-				ball_to_paddle := paddle_middle - ball_pos
-				ball_dir = linalg.normalize0(ball_to_paddle)
-				started = true
-			}
-		} else if game_over {
-			if rl.IsMouseButtonPressed(.LEFT) {
-				restart()
-			}
-		} else {
-			accumulated_time += rl.GetFrameTime()
-		}
+    if (blocks_left == 0) {
+      level += 1
+      load_level(chapter, level)
+    }
 
-		if (extra_life <= 0) {
-			extra_life += EXTRA_LIFE_SCORE
-			lives += 1
-		}
-
-		if (blocks_left == 0) {
-			level += 1
-			load_level(chapter, level)
-		}
-
-		for accumulated_time >= DT {
-			previous_ball_pos = ball_pos
-			previous_paddle_pos_x = paddle_pos_x
-			ball_pos += ball_dir * BALL_SPEED * DT
-
-			if ball_pos.x + BALL_RADIUS > RIGHT_WALL_X {
-				ball_pos.x = RIGHT_WALL_X - BALL_RADIUS
-				ball_dir = reflect(ball_dir, {-1, 0})
-			}
-
-			if ball_pos.x - BALL_RADIUS < LEFT_WALL_X {
-				ball_pos.x = LEFT_WALL_X + BALL_RADIUS
-				ball_dir = reflect(ball_dir, {1, 0})
-			}
-
-			if ball_pos.y - BALL_RADIUS < TOP_WALL_Y {
-				ball_pos.y = TOP_WALL_Y + BALL_RADIUS
-				ball_dir = reflect(ball_dir, {0, 1})
-			}
-
-			if ball_pos.y > SCREEN_SIZE_Y + BALL_RADIUS * 5 {
-				if !game_over && lives == 0 {
-					game_over = true
-					rl.PlaySound(game_over_sound)
-				} else {
-					lives -= 1
-					reset_paddle()
-				}
-			}
-
+    for accumulated_time >= DT {
 			mouse_dx := rl.GetMouseDelta().x * DT * MOUSE_SENSITIVITY
 			if abs(mouse_dx) > 0 {
 				paddle_pos_x += mouse_dx
 			}
 
-			paddle_pos_x = clamp(paddle_pos_x, LEFT_WALL_X, RIGHT_WALL_X - paddle_width)
+			previous_ball_pos = ball_pos
+			previous_paddle_pos_x = paddle_pos_x
+
+      if waiting_for_launch {
+        move_ball_to_paddle()
+      } else {
+        ball_pos += ball_dir * ball_speed * DT
+
+        if ball_pos.x + BALL_RADIUS > RIGHT_WALL_X {
+          ball_pos.x = RIGHT_WALL_X - BALL_RADIUS
+          ball_dir = reflect(ball_dir, {-1, 0})
+        }
+
+        if ball_pos.x - BALL_RADIUS < LEFT_WALL_X {
+          ball_pos.x = LEFT_WALL_X + BALL_RADIUS
+          ball_dir = reflect(ball_dir, {1, 0})
+        }
+
+        if ball_pos.y - BALL_RADIUS < TOP_WALL_Y {
+          ball_pos.y = TOP_WALL_Y + BALL_RADIUS
+          ball_dir = reflect(ball_dir, {0, 1})
+        }
+
+        if ball_pos.y > SCREEN_SIZE_Y + BALL_RADIUS * 5 {
+          if lives == 0 {
+            game_over = true
+            game_paused = true
+            rl.PlaySound(game_over_sound)
+          } else {
+            lives -= 1
+            reset_paddle()
+          }
+        }
+      }
 
 			// NOTE: Collision with paddle is a special snowflake that ignores incoming direction
 			// and chooses outgoing direction based on where the ball hits the paddle.
 			paddle_rect := rl.Rectangle{paddle_pos_x, PADDLE_POS_Y, paddle_width, PADDLE_HEIGHT}
-			if rl.CheckCollisionCircleRec(ball_pos, BALL_RADIUS, paddle_rect) &&
-			   ball_pos.y <= (paddle_rect.y + paddle_rect.height / 2) {
-				hit_pos_x := linalg.unlerp(
-					paddle_rect.x,
-					paddle_rect.x + paddle_rect.width,
-					ball_pos.x,
-				)
+			if rl.CheckCollisionCircleRec(ball_pos, BALL_RADIUS, paddle_rect) {
+        ball_hit_paddle()
 
-				ball_dir = linalg.normalize(rl.Vector2{(hit_pos_x - 0.5) * 3.0, -1})
+        if active_powerups[.Catch] {
+          ball_speed = 0
+          waiting_for_launch = true
+        }
 
 				rl.PlaySound(hit_paddle_sound)
 			}
@@ -391,7 +437,7 @@ main :: proc() {
 						score += block_score
 						extra_life -= block_score
 
-						#partial switch bc := Block_Color(blocks[x][y]); bc {
+						#partial switch blocks[x][y] {
 						case Block_Color.Adamantium:
 							break // unbreakable
 						case Block_Color.Steel:
@@ -400,7 +446,9 @@ main :: proc() {
 							{
 								blocks[x][y] = Block_Color.Empty
 								blocks_left -= 1
-                spawn_powerup(block_rect.x + block_rect.width/2, block_rect.y + block_rect.height/2)
+                if rand.float32() > 0.75 {
+                  spawn_powerup(block_rect.x + block_rect.width/2, block_rect.y + block_rect.height)
+                }
 							}
 						}
 
@@ -427,6 +475,7 @@ main :: proc() {
         }
       }
 
+			paddle_pos_x = clamp(paddle_pos_x, LEFT_WALL_X, RIGHT_WALL_X - paddle_width)
 			accumulated_time -= DT
 		}
 
@@ -444,12 +493,11 @@ main :: proc() {
 
 		rl.BeginMode2D(camera)
 
-		rl.DrawRectangleRec({0,            0, WALL_THICKNESS, SCREEN_SIZE_Y},  rl.GRAY)
-		rl.DrawRectangleRec({RIGHT_WALL_X, 0, WALL_THICKNESS, SCREEN_SIZE_Y},  rl.GRAY)
-		rl.DrawRectangleRec({0,            0, SCREEN_SIZE_X,  WALL_THICKNESS}, rl.GRAY)
-
-		rl.DrawTextureEx(paddle_texture, {paddle_render_pos_x, PADDLE_POS_Y}, 0, paddle_width/DEFAULT_PADDLE_WIDTH, rl.WHITE)
-		rl.DrawTextureV(ball_texture, ball_render_pos - {BALL_RADIUS, BALL_RADIUS}, rl.WHITE)
+    draw_rect_w_outline({paddle_render_pos_x, PADDLE_POS_Y, paddle_width, PADDLE_HEIGHT}, rl.DARKBLUE)
+    
+    rl.DrawCircleV(ball_render_pos, BALL_RADIUS, rl.GRAY)
+    rl.DrawRing(ball_render_pos, BALL_RADIUS - 1, BALL_RADIUS, -45, 145, 4, rl.DARKGRAY)
+    rl.DrawRing(ball_render_pos, BALL_RADIUS - 1, BALL_RADIUS, -225, -45, 4, rl.WHITE)
 
 		for x in 0 ..< NUM_BLOCKS_X {
 			for y in 0 ..< NUM_BLOCKS_Y {
@@ -458,21 +506,14 @@ main :: proc() {
 				}
 
 				block_rect := calc_block_rect(x, y)
-				top_left := rl.Vector2{block_rect.x, block_rect.y}
-				top_right := rl.Vector2{block_rect.x + block_rect.width, block_rect.y}
-				bottom_left := rl.Vector2{block_rect.x, block_rect.y + block_rect.height}
-				bottom_right := rl.Vector2 {
-					block_rect.x + block_rect.width,
-					block_rect.y + block_rect.height,
-				}
-
-				rl.DrawRectangleRec(block_rect, block_color_values[Block_Color(blocks[x][y])])
-				rl.DrawLineEx(top_left, top_right, 1, {255, 255, 150, 100})
-				rl.DrawLineEx(top_left, bottom_left, 1, {255, 255, 150, 100})
-				rl.DrawLineEx(top_right, bottom_right, 1, {0, 0, 50, 100})
-				rl.DrawLineEx(bottom_left, bottom_right, 1, {0, 0, 50, 100})
+				block_color := block_color_values[blocks[x][y]]
+        draw_rect_w_outline(block_rect, block_color)
 			}
 		}
+
+		rl.DrawRectangleRec({0,            0, WALL_THICKNESS, SCREEN_SIZE_Y},  rl.GRAY)
+		rl.DrawRectangleRec({RIGHT_WALL_X, 0, WALL_THICKNESS, SCREEN_SIZE_Y},  rl.GRAY)
+		rl.DrawRectangleRec({0,            0, SCREEN_SIZE_X,  WALL_THICKNESS}, rl.GRAY)
 
     for powerup in falling_powerups {
       powerup_rect := rl.Rectangle {
@@ -480,21 +521,12 @@ main :: proc() {
         POWERUP_SIZE*2, POWERUP_SIZE*2
       }
 
-      top_left := rl.Vector2{powerup_rect.x, powerup_rect.y}
-      top_right := rl.Vector2{powerup_rect.x + powerup_rect.width, powerup_rect.y}
-      bottom_left := rl.Vector2{powerup_rect.x, powerup_rect.y + powerup_rect.height}
-      bottom_right := rl.Vector2 {
-        powerup_rect.x + powerup_rect.width,
-        powerup_rect.y + powerup_rect.height,
-      }
-
-      rl.DrawRectangleRec(powerup_rect, powerup.color)
-      rl.DrawLineEx(top_left, top_right, 1, {255, 255, 150, 100})
-      rl.DrawLineEx(top_left, bottom_left, 1, {255, 255, 150, 100})
-      rl.DrawLineEx(top_right, bottom_right, 1, {0, 0, 50, 100})
-      rl.DrawLineEx(bottom_left, bottom_right, 1, {0, 0, 50, 100})
+      draw_rect_w_outline(powerup_rect, powerup.color)
+      x := i32(powerup.pos.x - POWERUP_SIZE + 2)
+      y := i32(powerup.pos.y - POWERUP_SIZE + 1)
       cstr := char_to_cstring(powerup_letter[powerup.type])
-      rl.DrawText(cstr, i32(top_left.x) + 2, i32(top_left.y) + 1, 3, rl.WHITE)
+      rl.DrawText(cstr, x+1, y+1, 2, rl.BLACK)
+      rl.DrawText(cstr, x, y, 2, rl.WHITE)
     }
 
 		left_offset: i32 = RIGHT_WALL_X + 20
@@ -526,7 +558,7 @@ main :: proc() {
 		rl.DrawText(level_text, left_offset, top_offset, VALUE_SIZE, rl.WHITE)
 		top_offset += 40
 
-		if !started {
+		if waiting_for_launch {
 			start_text := fmt.ctprint("Start: Left Click")
 			start_text_width := rl.MeasureText(start_text, 15)
 			rl.DrawText(
