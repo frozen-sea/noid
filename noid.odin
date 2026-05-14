@@ -34,6 +34,7 @@ POWERUP_SPEED :: 100
 POWERUP_SIZE :: 5.25
 DEFAULT_PADDLE_COLOR :: rl.DARKBLUE
 DEFAULT_BALL_COLOR :: rl.WHITE
+BARRIER_RECT :: rl.Rectangle {LEFT_WALL_X, PADDLE_POS_Y + PADDLE_HEIGHT/2, PLAY_AREA_WIDTH, 5}
 
 Block_Color :: enum u8 {
 	Empty,
@@ -283,7 +284,7 @@ draw_rect_w_outline :: proc(rect: rl.Rectangle, color: rl.Color) {
 }
 
 spawn_powerup :: proc(x, y: f32) {
-  options : []u8 = {1, 3, 5}
+  options : []u8 = {0, 1, 3, 5}
   type := Powerup_Type(rand.choice(options))
   append(&falling_powerups, Powerup {type, rl.Vector2 {x, y}, rl.BEIGE})
 }
@@ -320,6 +321,14 @@ activate_powerup :: proc(type: Powerup_Type) {
     } else {
       ball_speed = DEFAULT_BALL_SPEED * 0.75
       ball_color = rl.GOLD
+    }
+  }
+  case .Barrier: {
+    if active_powerups[.Catch] {
+      paddle_color = DEFAULT_PADDLE_COLOR
+      waiting_for_launch = false
+      ball_speed = previous_ball_speed
+      active_powerups[.Catch] = false
     }
   }
   }
@@ -501,6 +510,11 @@ main :: proc() {
         }
       }
 
+      if active_powerups[.Barrier] && rl.CheckCollisionCircleRec(ball_pos, BALL_RADIUS, BARRIER_RECT) {
+        ball_dir = reflect(ball_dir, {0, -1})
+        active_powerups[.Barrier] = false
+      }
+
 			paddle_pos_x = clamp(paddle_pos_x, LEFT_WALL_X, RIGHT_WALL_X - paddle_width)
 			accumulated_time -= DT
 		}
@@ -518,6 +532,12 @@ main :: proc() {
 		}
 
 		rl.BeginMode2D(camera)
+
+    if active_powerups[.Barrier] {
+      barrier_color := rl.SKYBLUE
+      barrier_color.a = u8(math.cos(rl.GetTime()) * 64 + 128)
+      rl.DrawRectangleRec(BARRIER_RECT, barrier_color)
+    }
 
     draw_rect_w_outline({paddle_render_pos_x, PADDLE_POS_Y, paddle_width, PADDLE_HEIGHT}, paddle_color)
     
