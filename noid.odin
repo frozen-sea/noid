@@ -19,10 +19,11 @@ PLAY_AREA_WIDTH :: RIGHT_WALL_X - LEFT_WALL_X // Must be evenly divisible by NUM
 DEFAULT_PADDLE_WIDTH :: 50
 PADDLE_HEIGHT :: 6
 PADDLE_POS_Y :: SCREEN_SIZE_Y - 50
-DEFAULT_BALL_SPEED :: 250
-DEFAULT_BALL_OFFSET_X :: DEFAULT_PADDLE_WIDTH * 2 / 3
+NORMAL_BALL_SPEED :: 250
+SLOW_BALL_SPEED :: NORMAL_BALL_SPEED * 0.7
+DEFAULT_BALL_OFFSET_X :: DEFAULT_PADDLE_WIDTH * 0.7
 BALL_RADIUS :: 4
-BALL_START_Y :: SCREEN_SIZE_Y / 3 * 2
+BALL_START_Y :: SCREEN_SIZE_Y / 0.7
 NUM_BLOCKS_X :: 10
 NUM_BLOCKS_Y :: 16
 BLOCK_WIDTH :: PLAY_AREA_WIDTH / NUM_BLOCKS_X
@@ -35,6 +36,10 @@ POWERUP_SIZE :: 5.25
 DEFAULT_PADDLE_COLOR :: rl.DARKBLUE
 DEFAULT_BALL_COLOR :: rl.WHITE
 BARRIER_RECT :: rl.Rectangle {LEFT_WALL_X, PADDLE_POS_Y + PADDLE_HEIGHT/2, PLAY_AREA_WIDTH, 5}
+MAX_LASER_COUNT :: 2
+LASER_SHOT_SPEED :: 2
+LASER_SHOT_LENGTH :: 20
+LASER_SHOT_WIDTH :: 1
 
 Block_Color :: enum u8 {
 	Empty,
@@ -107,19 +112,30 @@ powerup_letter := [Powerup_Type]u8 {
   .Pierce = 'P',
 }
 
+Laser :: struct {
+  origins: [2]rl.Vector2
+}
+
+MegaStruct :: struct {
+  waiting_for_launch: bool,
+  game_over: bool,
+  paddle_width: f32,
+  paddle_pos_x: f32,
+  ball_speed: f32,
+  falling_powerups: [dynamic; 8]Powerup,
+  active_powerups: [Powerup_Type]bool,
+  lasers: [MAX_LASER_COUNT]Laser,
+  next_laser_to_fire: int,
+}
+
+MS := MegaStruct {}
+
 blocks: [NUM_BLOCKS_X][NUM_BLOCKS_Y]Block_Color
-falling_powerups: [dynamic; 8]Powerup
-active_powerups: [Powerup_Type]bool
-paddle_width: f32
-paddle_pos_x: f32
 ball_pos: rl.Vector2
 ball_dir: rl.Vector2
-ball_speed: f32
 previous_ball_speed: f32
 ball_offset_x: f32
 game_paused: bool
-game_over: bool
-waiting_for_launch: bool
 blocks_left: int
 score: int
 extra_life: int
@@ -128,39 +144,43 @@ accumulated_time: f32
 previous_ball_pos: rl.Vector2
 previous_paddle_pos_x: f32
 chapter: int = 1
-level: int = 2
+level: int = 1
 paddle_color: rl.Color
 ball_color: rl.Color
+hit_block_sound: rl.Sound
+hit_paddle_sound: rl.Sound
+game_over_sound: rl.Sound
 
 move_ball_to_paddle :: proc() {
   ball_pos = {
-    paddle_pos_x + ball_offset_x,
+    MS.paddle_pos_x + ball_offset_x,
     PADDLE_POS_Y - BALL_RADIUS - 1,
   }
 }
 
 ball_hit_paddle :: proc() {
   hit_pos_x := linalg.unlerp(
-    paddle_pos_x,
-    paddle_pos_x + paddle_width,
+    MS.paddle_pos_x,
+    MS.paddle_pos_x + MS.paddle_width,
     ball_pos.x,
   )
-  ball_offset_x = paddle_width * hit_pos_x
+  ball_offset_x = MS.paddle_width * hit_pos_x
   ball_dir = linalg.normalize(rl.Vector2{(hit_pos_x - 0.5) * 3.0, -1})
 }
 
 reset_paddle :: proc() {
-  waiting_for_launch = true
+  MS.waiting_for_launch = true
   paddle_color = DEFAULT_PADDLE_COLOR
   ball_color = DEFAULT_BALL_COLOR
-  previous_ball_speed = DEFAULT_BALL_SPEED
-  ball_speed = 0
+  previous_ball_speed = NORMAL_BALL_SPEED
+  MS.ball_speed = 0
   ball_offset_x = DEFAULT_BALL_OFFSET_X
-  paddle_width = DEFAULT_PADDLE_WIDTH
-	paddle_pos_x = LEFT_WALL_X + PLAY_AREA_WIDTH / 2 - paddle_width / 2
-	previous_paddle_pos_x = paddle_pos_x
-  clear(&falling_powerups)
-  active_powerups = {}
+  MS.paddle_width = DEFAULT_PADDLE_WIDTH
+	MS.paddle_pos_x = LEFT_WALL_X + PLAY_AREA_WIDTH / 2 - MS.paddle_width / 2
+	previous_paddle_pos_x = MS.paddle_pos_x
+  clear(&MS.falling_powerups)
+  MS.active_powerups = {}
+  MS.lasers = {}
   move_ball_to_paddle()
   previous_ball_pos = ball_pos
   ball_hit_paddle()
@@ -199,15 +219,18 @@ load_level :: proc(new_chapter, new_level: int) {
 	}
 
 	reset_paddle()
+  MS.falling_powerups = {}
 }
 
-restart :: proc() {
+restart_game :: proc() {
   game_paused = false
-	game_over = false
+	MS.game_over = false
 	score = 0
 	extra_life = EXTRA_LIFE_SCORE
 	lives = 2
-	load_level(1, 1)
+  chapter = 1
+  level = 1
+	load_level(chapter, level)
 }
 
 char_to_block_color :: proc(char: u8) -> Block_Color {
@@ -284,56 +307,103 @@ draw_rect_w_outline :: proc(rect: rl.Rectangle, color: rl.Color) {
 }
 
 spawn_powerup :: proc(x, y: f32) {
-  options : []u8 = {0, 1, 3, 5}
+  options : []u8 = {0, 1, 3, 4, 5}
   type := Powerup_Type(rand.choice(options))
-  append(&falling_powerups, Powerup {type, rl.Vector2 {x, y}, rl.BEIGE})
+  append(&MS.falling_powerups, Powerup {type, rl.Vector2 {x, y}, rl.BEIGE})
 }
 
 activate_powerup :: proc(type: Powerup_Type) {
   #partial switch type {
   case .Enlarge: {
-    if active_powerups[.Enlarge] {
+    if MS.active_powerups[.Enlarge] {
       break
     }
-    paddle_pos_x -= paddle_width * (1 - 1/1.5)
-    previous_paddle_pos_x = paddle_pos_x
-    paddle_width = DEFAULT_PADDLE_WIDTH * 1.5
-    if active_powerups[.Catch] {
+    MS.paddle_pos_x -= MS.paddle_width * (1 - 1/1.5)
+    previous_paddle_pos_x = MS.paddle_pos_x
+    MS.paddle_width = DEFAULT_PADDLE_WIDTH * 1.5
+    if MS.active_powerups[.Catch] {
       paddle_color = DEFAULT_PADDLE_COLOR
-      waiting_for_launch = false
-      ball_speed = previous_ball_speed
-      active_powerups[.Catch] = false
+      MS.waiting_for_launch = false
+      MS.ball_speed = previous_ball_speed
+      MS.active_powerups[.Catch] = false
     }
   }
   case .Catch: {
     paddle_color = rl.DARKGREEN
-    if active_powerups[.Enlarge] {
-      paddle_width = DEFAULT_PADDLE_WIDTH
-      paddle_pos_x += paddle_width * (1 - 1/1.5)
-      previous_paddle_pos_x = paddle_pos_x
-      active_powerups[.Enlarge] = false
+    if MS.active_powerups[.Enlarge] {
+      MS.paddle_width = DEFAULT_PADDLE_WIDTH
+      MS.paddle_pos_x += MS.paddle_width * (1 - 1/1.5)
+      previous_paddle_pos_x = MS.paddle_pos_x
+      MS.active_powerups[.Enlarge] = false
     }
   }
   case .Slow: {
-    if active_powerups[.Slow] {
-      ball_speed = DEFAULT_BALL_SPEED
+    if MS.active_powerups[.Slow] {
+      MS.ball_speed = NORMAL_BALL_SPEED
       ball_color = DEFAULT_BALL_COLOR
     } else {
-      ball_speed = DEFAULT_BALL_SPEED * 0.75
+      MS.ball_speed = SLOW_BALL_SPEED
       ball_color = rl.GOLD
     }
   }
   case .Barrier: {
-    if active_powerups[.Catch] {
+    if MS.active_powerups[.Catch] {
       paddle_color = DEFAULT_PADDLE_COLOR
-      waiting_for_launch = false
-      ball_speed = previous_ball_speed
-      active_powerups[.Catch] = false
+      MS.waiting_for_launch = false
+      MS.ball_speed = previous_ball_speed
+      MS.active_powerups[.Catch] = false
+    }
+  }
+  case .Laser: {
+    paddle_color = rl.MAROON
+    if MS.active_powerups[.Catch] {
+      paddle_color = DEFAULT_PADDLE_COLOR
+      MS.waiting_for_launch = false
+      MS.ball_speed = previous_ball_speed
+      MS.active_powerups[.Catch] = false
+    }
+    if MS.active_powerups[.Enlarge] {
+      MS.paddle_width = DEFAULT_PADDLE_WIDTH
+      MS.paddle_pos_x += MS.paddle_width * (1 - 1/1.5)
+      previous_paddle_pos_x = MS.paddle_pos_x
+      MS.active_powerups[.Enlarge] = false
     }
   }
   }
 
-  active_powerups[type] = true
+  MS.active_powerups[type] = true
+}
+
+damage_block_at_index :: proc(x, y: int) {
+  block_rect := calc_block_rect(x, y)
+  block_score := block_color_score[blocks[x][y]]
+  score += block_score
+  extra_life -= block_score
+
+  #partial switch blocks[x][y] {
+  case Block_Color.Adamantium:
+    break // unbreakable
+  case Block_Color.Steel:
+    blocks[x][y] = Block_Color.DamagedSteel
+  case:
+    {
+      blocks[x][y] = Block_Color.Empty
+      blocks_left -= 1
+      if rand.float32() > 0.75 {
+        spawn_powerup(block_rect.x + block_rect.width/2, block_rect.y + block_rect.height)
+      }
+    }
+  }
+
+  rl.SetSoundPitch(hit_block_sound, rand.float32_range(0.8, 1.2))
+  rl.PlaySound(hit_block_sound)
+}
+
+block_at_point :: proc(point: rl.Vector2) -> (x, y: int, empty: bool) {
+  x = (int(point.x) - LEFT_WALL_X) / BLOCK_WIDTH
+  y = (int(point.y) - TOP_WALL_Y)  / BLOCK_HEIGHT
+  empty = !block_exists(x, y)
+  return
 }
 
 main :: proc() {
@@ -343,11 +413,11 @@ main :: proc() {
 	rl.SetTargetFPS(500)
 	rl.DisableCursor()
 
-	hit_block_sound := rl.LoadSound("assets/hit_block.wav")
-	hit_paddle_sound := rl.LoadSound("assets/hit_paddle.wav")
-	game_over_sound := rl.LoadSound("assets/game_over.wav")
+	hit_block_sound = rl.LoadSound("assets/hit_block.wav")
+	hit_paddle_sound = rl.LoadSound("assets/hit_paddle.wav")
+	game_over_sound = rl.LoadSound("assets/game_over.wav")
 
-	restart()
+	restart_game()
 
   for !rl.WindowShouldClose() {
     DT :: 1.0 / PHYSICS_TICK_RATE
@@ -355,11 +425,24 @@ main :: proc() {
     if rl.IsKeyPressed(.ESCAPE) {return}
     
     if rl.IsMouseButtonPressed(.LEFT) {
-      if game_over {restart()}
-      else if waiting_for_launch {
-        ball_speed = DEFAULT_BALL_SPEED
-        waiting_for_launch = false
+      if MS.game_over {
+        restart_game()
       }
+      else if MS.waiting_for_launch {
+        MS.ball_speed = MS.active_powerups[.Slow] ? SLOW_BALL_SPEED : NORMAL_BALL_SPEED
+        MS.waiting_for_launch = false
+      }
+      else if MS.active_powerups[.Laser] {
+        if MS.lasers[MS.next_laser_to_fire] == {} {
+          MS.lasers[MS.next_laser_to_fire] = Laser {
+            origins = {
+              { MS.paddle_pos_x,                   PADDLE_POS_Y },
+              { MS.paddle_pos_x + MS.paddle_width, PADDLE_POS_Y },
+            }
+          }
+          MS.next_laser_to_fire = (MS.next_laser_to_fire + 1) % MAX_LASER_COUNT
+        }
+      } 
     }
 
     if !game_paused {
@@ -379,16 +462,16 @@ main :: proc() {
     for accumulated_time >= DT {
 			mouse_dx := rl.GetMouseDelta().x * DT * MOUSE_SENSITIVITY
 			if abs(mouse_dx) > 0 {
-				paddle_pos_x += mouse_dx
+				MS.paddle_pos_x += mouse_dx
 			}
 
 			previous_ball_pos = ball_pos
-			previous_paddle_pos_x = paddle_pos_x
+			previous_paddle_pos_x = MS.paddle_pos_x
 
-      if waiting_for_launch {
+      if MS.waiting_for_launch {
         move_ball_to_paddle()
       } else {
-        ball_pos += ball_dir * ball_speed * DT
+        ball_pos += ball_dir * MS.ball_speed * DT
 
         if ball_pos.x + BALL_RADIUS > RIGHT_WALL_X {
           ball_pos.x = RIGHT_WALL_X - BALL_RADIUS
@@ -407,7 +490,7 @@ main :: proc() {
 
         if ball_pos.y > SCREEN_SIZE_Y + BALL_RADIUS * 5 {
           if lives == 0 {
-            game_over = true
+            MS.game_over = true
             game_paused = true
             rl.PlaySound(game_over_sound)
           } else {
@@ -419,14 +502,14 @@ main :: proc() {
 
 			// NOTE: Collision with paddle is a special snowflake that ignores incoming direction
 			// and chooses outgoing direction based on where the ball hits the paddle.
-			paddle_rect := rl.Rectangle{paddle_pos_x, PADDLE_POS_Y, paddle_width, PADDLE_HEIGHT}
+			paddle_rect := rl.Rectangle{MS.paddle_pos_x, PADDLE_POS_Y, MS.paddle_width, PADDLE_HEIGHT}
 			if rl.CheckCollisionCircleRec(ball_pos, BALL_RADIUS, paddle_rect) {
         ball_hit_paddle()
 
-        if active_powerups[.Catch] {
-          previous_ball_speed = ball_speed
-          ball_speed = 0
-          waiting_for_launch = true
+        if MS.active_powerups[.Catch] {
+          previous_ball_speed = MS.ball_speed
+          MS.ball_speed = 0
+          MS.waiting_for_launch = true
         }
 
 				rl.PlaySound(hit_paddle_sound)
@@ -468,35 +551,32 @@ main :: proc() {
 							ball_dir = reflect(ball_dir, collision_normal)
 						}
 
-						block_score := block_color_score[Block_Color(blocks[x][y])]
-						score += block_score
-						extra_life -= block_score
-
-						#partial switch blocks[x][y] {
-						case Block_Color.Adamantium:
-							break // unbreakable
-						case Block_Color.Steel:
-							blocks[x][y] = Block_Color.DamagedSteel
-						case:
-							{
-								blocks[x][y] = Block_Color.Empty
-								blocks_left -= 1
-                if rand.float32() > 0.75 {
-                  spawn_powerup(block_rect.x + block_rect.width/2, block_rect.y + block_rect.height)
-                }
-							}
-						}
-
-						rl.SetSoundPitch(hit_block_sound, rand.float32_range(0.8, 1.2))
-						rl.PlaySound(hit_block_sound)
-
+            damage_block_at_index(x, y)
 						break block_x_loop
 					}
 				}
 			}
 
-      for i := len(falling_powerups) - 1; i >= 0; i -= 1 {
-        powerup := &falling_powerups[i]
+      for &laser in MS.lasers {
+        for &origin in laser.origins {
+          laser_hit_point := rl.Vector2 {
+            origin.x,
+            origin.y - LASER_SHOT_LENGTH
+          }
+          x, y, empty := block_at_point(laser_hit_point)
+          if !empty {
+            damage_block_at_index(x, y)
+            origin = {}
+          } else if laser_hit_point.y <= 0 {
+            origin = {}
+          } else {
+            origin.y -= LASER_SHOT_SPEED
+          }
+        }
+      }
+
+      for i := len(MS.falling_powerups) - 1; i >= 0; i -= 1 {
+        powerup := &MS.falling_powerups[i]
         powerup.pos.y += POWERUP_SPEED * DT
         powerup_rect := rl.Rectangle {
           powerup.pos.x - POWERUP_SIZE, powerup.pos.y - POWERUP_SIZE,
@@ -504,25 +584,25 @@ main :: proc() {
         }
         if rl.CheckCollisionRecs(paddle_rect, powerup_rect) {
           activate_powerup(powerup.type)
-          ordered_remove(&falling_powerups, i)
+          ordered_remove(&MS.falling_powerups, i)
         } else if powerup_rect.y > SCREEN_SIZE_Y {
-          ordered_remove(&falling_powerups, i)
+          ordered_remove(&MS.falling_powerups, i)
         }
       }
 
-      if active_powerups[.Barrier] && rl.CheckCollisionCircleRec(ball_pos, BALL_RADIUS, BARRIER_RECT) {
+      if MS.active_powerups[.Barrier] && rl.CheckCollisionCircleRec(ball_pos, BALL_RADIUS, BARRIER_RECT) {
         ball_dir = reflect(ball_dir, {0, -1})
-        active_powerups[.Barrier] = false
+        MS.active_powerups[.Barrier] = false
       }
 
-			paddle_pos_x = clamp(paddle_pos_x, LEFT_WALL_X, RIGHT_WALL_X - paddle_width)
+			MS.paddle_pos_x = clamp(MS.paddle_pos_x, LEFT_WALL_X, RIGHT_WALL_X - MS.paddle_width)
 			accumulated_time -= DT
 		}
 
     // Clear out the leftover time
 		blend := accumulated_time / DT
 		ball_render_pos := math.lerp(previous_ball_pos, ball_pos, blend)
-		paddle_render_pos_x := math.lerp(previous_paddle_pos_x, paddle_pos_x, blend)
+		paddle_render_pos_x := math.lerp(previous_paddle_pos_x, MS.paddle_pos_x, blend)
 
 		rl.BeginDrawing()
 		rl.ClearBackground(rl.BLACK)
@@ -533,13 +613,25 @@ main :: proc() {
 
 		rl.BeginMode2D(camera)
 
-    if active_powerups[.Barrier] {
+    if MS.active_powerups[.Laser] {
+      for laser in MS.lasers {
+        for origin in laser.origins {
+          rect := rl.Rectangle {
+            origin.x - LASER_SHOT_WIDTH, origin.y - LASER_SHOT_LENGTH,
+            2*LASER_SHOT_WIDTH + 1, LASER_SHOT_LENGTH
+          }
+          rl.DrawRectangleRec(rect, rl.RED)
+        }
+      }
+    }
+
+    if MS.active_powerups[.Barrier] {
       barrier_color := rl.SKYBLUE
       barrier_color.a = u8(math.cos(rl.GetTime()) * 64 + 128)
       rl.DrawRectangleRec(BARRIER_RECT, barrier_color)
     }
 
-    draw_rect_w_outline({paddle_render_pos_x, PADDLE_POS_Y, paddle_width, PADDLE_HEIGHT}, paddle_color)
+    draw_rect_w_outline({paddle_render_pos_x, PADDLE_POS_Y, MS.paddle_width, PADDLE_HEIGHT}, paddle_color)
     
     rl.DrawCircleV(ball_render_pos, BALL_RADIUS, ball_color)
     darker_color := rl.ColorBrightness(ball_color, -0.5)
@@ -563,7 +655,7 @@ main :: proc() {
 		rl.DrawRectangleRec({RIGHT_WALL_X, 0, WALL_THICKNESS, SCREEN_SIZE_Y},  rl.GRAY)
 		rl.DrawRectangleRec({0,            0, SCREEN_SIZE_X,  WALL_THICKNESS}, rl.GRAY)
 
-    for powerup in falling_powerups {
+    for powerup in MS.falling_powerups {
       powerup_rect := rl.Rectangle {
         powerup.pos.x - POWERUP_SIZE, powerup.pos.y - POWERUP_SIZE,
         POWERUP_SIZE*2, POWERUP_SIZE*2
@@ -573,7 +665,7 @@ main :: proc() {
       x := i32(powerup.pos.x - POWERUP_SIZE + 2)
       y := i32(powerup.pos.y - POWERUP_SIZE + 1)
       str := char_to_cstring(powerup_letter[powerup.type])
-      if powerup.type == .Slow && active_powerups[.Slow] {
+      if powerup.type == .Slow && MS.active_powerups[.Slow] {
         str = "F"
       }
       rl.DrawText(str, x+1, y+1, 2, rl.BLACK)
@@ -609,7 +701,7 @@ main :: proc() {
 		rl.DrawText(level_text, left_offset, top_offset, VALUE_SIZE, rl.WHITE)
 		top_offset += 40
 
-		if waiting_for_launch {
+		if MS.waiting_for_launch {
 			start_text := fmt.ctprint("Start: Left Click")
 			start_text_width := rl.MeasureText(start_text, 15)
 			rl.DrawText(
@@ -621,7 +713,7 @@ main :: proc() {
 			)
 		}
 
-		if game_over {
+		if MS.game_over {
 			game_over_text := fmt.ctprintf("Score: %v. Reset: Left Click", score)
 			game_over_text_width := rl.MeasureText(game_over_text, 15)
 			rl.DrawText(
