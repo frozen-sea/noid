@@ -40,6 +40,8 @@ MAX_LASER_COUNT :: 2
 LASER_SHOT_SPEED :: 2
 LASER_SHOT_LENGTH :: 20
 LASER_SHOT_WIDTH :: 1
+BALL_TRAIL_LENGTH :: 16
+BALL_TRAIL_STEP :: 1.0/BALL_TRAIL_LENGTH
 
 Block_Color :: enum u8 {
 	Empty,
@@ -113,7 +115,12 @@ powerup_letter := [Powerup_Type]u8 {
 }
 
 Laser :: struct {
-  origins: [2]rl.Vector2
+  origins: [2]rl.Vector2,
+}
+
+Ball_Trail :: struct {
+  pos: rl.Vector2,
+  opacity: f32,
 }
 
 MegaStruct :: struct {
@@ -126,6 +133,8 @@ MegaStruct :: struct {
   active_powerups: [Powerup_Type]bool,
   lasers: [MAX_LASER_COUNT]Laser,
   next_laser_to_fire: int,
+  ball_trails: [dynamic; BALL_TRAIL_LENGTH]Ball_Trail,
+  next_ball_trail_tick_time: f64
 }
 
 MS := MegaStruct {}
@@ -305,7 +314,7 @@ draw_rect_w_outline :: proc(rect: rl.Rectangle, color: rl.Color) {
 }
 
 spawn_powerup :: proc(x, y: f32) {
-  options : []u8 = {0, 1, 3, 4, 5}
+  options : []u8 = {0, 1, 3, 4, 5, 6}
   type := Powerup_Type(rand.choice(options))
   append(&MS.falling_powerups, Powerup {type, rl.Vector2 {x, y}, rl.BEIGE})
 }
@@ -326,6 +335,14 @@ activate_powerup :: proc(type: Powerup_Type) {
     }
   }
   case .Catch: {
+    if MS.active_powerups[.Pierce] {
+      MS.active_powerups[.Pierce] = false
+      ball_color = DEFAULT_BALL_COLOR
+    }
+    if MS.active_powerups[.Laser] {
+      MS.active_powerups[.Laser] = false
+      MS.lasers = {}
+    }
     paddle_color = rl.DARKGREEN
     if MS.active_powerups[.Enlarge] {
       MS.paddle_width = DEFAULT_PADDLE_WIDTH
@@ -334,6 +351,9 @@ activate_powerup :: proc(type: Powerup_Type) {
     }
   }
   case .Slow: {
+    if MS.active_powerups[.Pierce] {
+      MS.active_powerups[.Pierce] = false
+    }
     if MS.active_powerups[.Slow] {
       MS.ball_speed = NORMAL_BALL_SPEED
       ball_color = DEFAULT_BALL_COLOR
@@ -350,10 +370,25 @@ activate_powerup :: proc(type: Powerup_Type) {
       MS.ball_speed = previous_ball_speed
       MS.active_powerups[.Catch] = false
     }
-    if MS.active_powerups[.Enlarge] {
-      MS.paddle_width = DEFAULT_PADDLE_WIDTH
-      MS.paddle_pos_x += MS.paddle_width * (1 - 1/1.5)
-      MS.active_powerups[.Enlarge] = false
+    if MS.active_powerups[.Pierce] {
+      MS.active_powerups[.Pierce] = false
+    }
+  }
+  case .Pierce: {
+    ball_color = rl.GREEN
+    if MS.active_powerups[.Slow] {
+      MS.ball_speed = NORMAL_BALL_SPEED
+      MS.active_powerups[.Slow] = false
+    }
+    if MS.active_powerups[.Catch] {
+      MS.waiting_for_launch = false
+      MS.ball_speed = previous_ball_speed
+      MS.active_powerups[.Catch] = false
+    }
+    if MS.active_powerups[.Laser] {
+      paddle_color = DEFAULT_PADDLE_COLOR
+      MS.active_powerups[.Laser] = false
+      MS.lasers = {}
     }
   }
   }
@@ -392,6 +427,16 @@ block_at_point :: proc(point: rl.Vector2) -> (x, y: int, empty: bool) {
   y = (int(point.y) - TOP_WALL_Y - 1) / BLOCK_HEIGHT
   empty = !block_exists(x, y)
   return
+}
+
+render_ball :: proc(pos: rl.Vector2, opacity: f32) {
+  color := ball_color
+  color.a = u8(255*opacity)
+  darker_color := rl.ColorBrightness(color, -0.5)
+  lighter_color := rl.ColorBrightness(color, 0.5)
+  rl.DrawCircleV(pos, BALL_RADIUS, color)
+  rl.DrawRing(pos, BALL_RADIUS - 1, BALL_RADIUS, -45, 145, 4, darker_color)
+  rl.DrawRing(pos, BALL_RADIUS - 1, BALL_RADIUS, -225, -45, 4, lighter_color)
 }
 
 main :: proc() {
@@ -531,6 +576,9 @@ main :: proc() {
 						if block_exists(x, y + int(collision_normal.y)) {
 							collision_normal.y = 0
 						}
+            if MS.active_powerups[.Pierce] && blocks[x][y] != Block_Color.Adamantium {
+              collision_normal = 0
+            }
 
 						if collision_normal != 0 {
 							ball_dir = reflect(ball_dir, collision_normal)
@@ -580,14 +628,26 @@ main :: proc() {
         MS.active_powerups[.Barrier] = false
       }
 
+      if MS.active_powerups[.Pierce] {
+        time := rl.GetTime()
+        if (time > MS.next_ball_trail_tick_time) {
+          append(&MS.ball_trails, Ball_Trail {previous_ball_pos, BALL_TRAIL_STEP*(BALL_TRAIL_LENGTH-1)})
+          MS.next_ball_trail_tick_time = time + 0.01
+
+          for i := len(MS.ball_trails) - 1; i >= 0; i -= 1 {
+            trail := &MS.ball_trails[i]
+            trail.opacity -= BALL_TRAIL_STEP
+            if trail.opacity <= 0 {
+              ordered_remove(&MS.ball_trails, i)
+            } 
+          }
+        }
+      }
+
       MS.paddle_pos_x = clamp(MS.paddle_pos_x, LEFT_WALL_X, RIGHT_WALL_X - MS.paddle_width)
       if MS.waiting_for_launch { move_ball_to_paddle() }
 			accumulated_time -= DT
 		}
-
-		blend := accumulated_time / DT
-		ball_render_pos := ball_pos//math.lerp(previous_ball_pos, ball_pos, blend)
-		paddle_render_pos_x := MS.paddle_pos_x//math.lerp(previous_paddle_pos_x, MS.paddle_pos_x, blend)
 
 		rl.BeginDrawing()
 		rl.ClearBackground(rl.BLACK)
@@ -616,13 +676,15 @@ main :: proc() {
       rl.DrawRectangleRec(BARRIER_RECT, barrier_color)
     }
 
-    draw_rect_w_outline({paddle_render_pos_x, PADDLE_POS_Y, MS.paddle_width, PADDLE_HEIGHT}, paddle_color)
-    
-    rl.DrawCircleV(ball_render_pos, BALL_RADIUS, ball_color)
-    darker_color := rl.ColorBrightness(ball_color, -0.5)
-    lighter_color := rl.ColorBrightness(ball_color, 0.5)
-    rl.DrawRing(ball_render_pos, BALL_RADIUS - 1, BALL_RADIUS, -45, 145, 4, darker_color)
-    rl.DrawRing(ball_render_pos, BALL_RADIUS - 1, BALL_RADIUS, -225, -45, 4, lighter_color)
+    draw_rect_w_outline({MS.paddle_pos_x, PADDLE_POS_Y, MS.paddle_width, PADDLE_HEIGHT}, paddle_color)
+
+    render_ball(ball_pos, 1.0)
+
+    if MS.active_powerups[.Pierce] {
+      for &ball_trail in MS.ball_trails {
+        render_ball(ball_trail.pos, ball_trail.opacity)
+      }
+    }
 
 		for x in 0 ..< NUM_BLOCKS_X {
 			for y in 0 ..< NUM_BLOCKS_Y {
