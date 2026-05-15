@@ -142,7 +142,6 @@ extra_life: int
 lives: int
 accumulated_time: f32
 previous_ball_pos: rl.Vector2
-previous_paddle_pos_x: f32
 chapter: int = 1
 level: int = 1
 paddle_color: rl.Color
@@ -177,7 +176,6 @@ reset_paddle :: proc() {
   ball_offset_x = DEFAULT_BALL_OFFSET_X
   MS.paddle_width = DEFAULT_PADDLE_WIDTH
 	MS.paddle_pos_x = LEFT_WALL_X + PLAY_AREA_WIDTH / 2 - MS.paddle_width / 2
-	previous_paddle_pos_x = MS.paddle_pos_x
   clear(&MS.falling_powerups)
   MS.active_powerups = {}
   MS.lasers = {}
@@ -319,7 +317,6 @@ activate_powerup :: proc(type: Powerup_Type) {
       break
     }
     MS.paddle_pos_x -= MS.paddle_width * (1 - 1/1.5)
-    previous_paddle_pos_x = MS.paddle_pos_x
     MS.paddle_width = DEFAULT_PADDLE_WIDTH * 1.5
     if MS.active_powerups[.Catch] {
       paddle_color = DEFAULT_PADDLE_COLOR
@@ -333,7 +330,6 @@ activate_powerup :: proc(type: Powerup_Type) {
     if MS.active_powerups[.Enlarge] {
       MS.paddle_width = DEFAULT_PADDLE_WIDTH
       MS.paddle_pos_x += MS.paddle_width * (1 - 1/1.5)
-      previous_paddle_pos_x = MS.paddle_pos_x
       MS.active_powerups[.Enlarge] = false
     }
   }
@@ -346,18 +342,10 @@ activate_powerup :: proc(type: Powerup_Type) {
       ball_color = rl.GOLD
     }
   }
-  case .Barrier: {
-    if MS.active_powerups[.Catch] {
-      paddle_color = DEFAULT_PADDLE_COLOR
-      MS.waiting_for_launch = false
-      MS.ball_speed = previous_ball_speed
-      MS.active_powerups[.Catch] = false
-    }
-  }
+  case .Barrier: {}
   case .Laser: {
     paddle_color = rl.MAROON
     if MS.active_powerups[.Catch] {
-      paddle_color = DEFAULT_PADDLE_COLOR
       MS.waiting_for_launch = false
       MS.ball_speed = previous_ball_speed
       MS.active_powerups[.Catch] = false
@@ -365,7 +353,6 @@ activate_powerup :: proc(type: Powerup_Type) {
     if MS.active_powerups[.Enlarge] {
       MS.paddle_width = DEFAULT_PADDLE_WIDTH
       MS.paddle_pos_x += MS.paddle_width * (1 - 1/1.5)
-      previous_paddle_pos_x = MS.paddle_pos_x
       MS.active_powerups[.Enlarge] = false
     }
   }
@@ -400,8 +387,9 @@ damage_block_at_index :: proc(x, y: int) {
 }
 
 block_at_point :: proc(point: rl.Vector2) -> (x, y: int, empty: bool) {
-  x = (int(point.x) - LEFT_WALL_X) / BLOCK_WIDTH
-  y = (int(point.y) - TOP_WALL_Y)  / BLOCK_HEIGHT
+  // HACK: Stupid fudge factor to make hitting the very bottom right corner of a block work
+  x = (int(point.x) - LEFT_WALL_X - 1) / BLOCK_WIDTH
+  y = (int(point.y) - TOP_WALL_Y - 1) / BLOCK_HEIGHT
   empty = !block_exists(x, y)
   return
 }
@@ -436,8 +424,8 @@ main :: proc() {
         if MS.lasers[MS.next_laser_to_fire] == {} {
           MS.lasers[MS.next_laser_to_fire] = Laser {
             origins = {
-              { MS.paddle_pos_x,                   PADDLE_POS_Y },
-              { MS.paddle_pos_x + MS.paddle_width, PADDLE_POS_Y },
+              { MS.paddle_pos_x + LASER_SHOT_WIDTH,                   PADDLE_POS_Y },
+              { MS.paddle_pos_x - LASER_SHOT_WIDTH + MS.paddle_width, PADDLE_POS_Y },
             }
           }
           MS.next_laser_to_fire = (MS.next_laser_to_fire + 1) % MAX_LASER_COUNT
@@ -466,11 +454,8 @@ main :: proc() {
 			}
 
 			previous_ball_pos = ball_pos
-			previous_paddle_pos_x = MS.paddle_pos_x
 
-      if MS.waiting_for_launch {
-        move_ball_to_paddle()
-      } else {
+      if !MS.waiting_for_launch {
         ball_pos += ball_dir * MS.ball_speed * DT
 
         if ball_pos.x + BALL_RADIUS > RIGHT_WALL_X {
@@ -502,7 +487,7 @@ main :: proc() {
 
 			// NOTE: Collision with paddle is a special snowflake that ignores incoming direction
 			// and chooses outgoing direction based on where the ball hits the paddle.
-			paddle_rect := rl.Rectangle{MS.paddle_pos_x, PADDLE_POS_Y, MS.paddle_width, PADDLE_HEIGHT}
+			paddle_rect := rl.Rectangle {MS.paddle_pos_x, PADDLE_POS_Y, MS.paddle_width, PADDLE_HEIGHT}
 			if rl.CheckCollisionCircleRec(ball_pos, BALL_RADIUS, paddle_rect) {
         ball_hit_paddle()
 
@@ -595,14 +580,14 @@ main :: proc() {
         MS.active_powerups[.Barrier] = false
       }
 
-			MS.paddle_pos_x = clamp(MS.paddle_pos_x, LEFT_WALL_X, RIGHT_WALL_X - MS.paddle_width)
+      MS.paddle_pos_x = clamp(MS.paddle_pos_x, LEFT_WALL_X, RIGHT_WALL_X - MS.paddle_width)
+      if MS.waiting_for_launch { move_ball_to_paddle() }
 			accumulated_time -= DT
 		}
 
-    // Clear out the leftover time
 		blend := accumulated_time / DT
-		ball_render_pos := math.lerp(previous_ball_pos, ball_pos, blend)
-		paddle_render_pos_x := math.lerp(previous_paddle_pos_x, MS.paddle_pos_x, blend)
+		ball_render_pos := ball_pos//math.lerp(previous_ball_pos, ball_pos, blend)
+		paddle_render_pos_x := MS.paddle_pos_x//math.lerp(previous_paddle_pos_x, MS.paddle_pos_x, blend)
 
 		rl.BeginDrawing()
 		rl.ClearBackground(rl.BLACK)
