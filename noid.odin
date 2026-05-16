@@ -31,6 +31,7 @@ BLOCK_WIDTH :: PLAY_AREA_WIDTH / NUM_BLOCKS_X
 BLOCK_HEIGHT :: 15
 EXTRA_LIFE_SCORE :: 2500
 PHYSICS_TICK_RATE :: 120
+DT :: 1.0 / PHYSICS_TICK_RATE
 MOUSE_SENSITIVITY :: 50 // 0-100
 POWERUP_SPEED :: 100
 POWERUP_SIZE :: 5.25
@@ -43,6 +44,7 @@ LASER_SHOT_LENGTH :: 20
 LASER_SHOT_WIDTH :: 1
 BALL_TRAIL_LENGTH :: 16
 BALL_TRAIL_STEP :: 1.0/BALL_TRAIL_LENGTH
+MULTIBALL_EXTRA_BALLS :: 6
 
 Block_Color :: enum u8 {
 	Empty,
@@ -124,7 +126,7 @@ Ball_Trail :: struct {
 }
 
 Ball :: struct {
-  pos: rl.Vector2,
+  pos, prev_pos: rl.Vector2,
   dir: rl.Vector2,
   speed: f32,
   last_hit_offset: f32
@@ -135,7 +137,7 @@ MegaStruct :: struct {
   game_over: bool,
   paddle_width: f32,
   paddle_pos_x: f32,
-  balls: [dynamic; 4]Ball,
+  balls: [dynamic; MULTIBALL_EXTRA_BALLS + 1]Ball,
   falling_powerups: [dynamic; 8]Powerup,
   active_powerups: [Powerup_Type]bool,
   lasers: [MAX_LASER_COUNT]Laser,
@@ -169,14 +171,14 @@ move_ball_to_paddle :: proc(default: bool = false) {
   }
 }
 
-ball_hit_paddle :: proc() {
+ball_hit_paddle :: proc(ball_index: int = 0) {
   hit_pos_x := linalg.unlerp(
     MS.paddle_pos_x,
     MS.paddle_pos_x + MS.paddle_width,
-    MS.balls[0].pos.x,
+    MS.balls[ball_index].pos.x,
   )
-  MS.balls[0].last_hit_offset = hit_pos_x
-  MS.balls[0].dir = linalg.normalize(rl.Vector2{(hit_pos_x - 0.5) * 3.0, -1})
+  MS.balls[ball_index].last_hit_offset = hit_pos_x
+  MS.balls[ball_index].dir = linalg.normalize(rl.Vector2{(hit_pos_x - 0.5) * 3.0, -1})
 }
 
 reset_paddle :: proc() {
@@ -393,6 +395,22 @@ activate_powerup :: proc(type: Powerup_Type) {
       MS.active_powerups[.Laser] = false
     }
   }
+  case .Multiball: {
+    if MS.active_powerups[.Pierce] {
+      clear(&MS.ball_trails)
+      ball_color = DEFAULT_BALL_COLOR
+      MS.active_powerups[.Pierce] = false
+    }
+    if !MS.active_powerups[.Multiball] {
+      for i in 0..<MULTIBALL_EXTRA_BALLS {
+        append(&MS.balls, Ball {
+          pos = MS.balls[0].pos,
+          dir = {rand.float32_range(-1, 1), -1},
+          speed = MS.active_powerups[.Slow] ? SLOW_BALL_SPEED : NORMAL_BALL_SPEED,
+        })
+      }
+    }
+  }
   }
 
   MS.active_powerups[type] = true
@@ -455,330 +473,367 @@ main :: proc() {
 	restart_game()
 
   for !rl.WindowShouldClose() {
-    DT :: 1.0 / PHYSICS_TICK_RATE
-
-    if rl.IsKeyPressed(.ESCAPE) {return}
-    
-    if rl.IsMouseButtonPressed(.LEFT) {
-      if MS.game_over {
-        restart_game()
-      }
-      else if MS.waiting_for_launch {
-        MS.balls[0].speed = MS.active_powerups[.Slow] ? SLOW_BALL_SPEED : NORMAL_BALL_SPEED
-        MS.waiting_for_launch = false
-      }
-      else if MS.active_powerups[.Laser] {
-        if MS.lasers[MS.next_laser_to_fire] == {} {
-          MS.lasers[MS.next_laser_to_fire] = Laser {
-            origins = {
-              { MS.paddle_pos_x + LASER_SHOT_WIDTH,                   PADDLE_POS_Y },
-              { MS.paddle_pos_x - LASER_SHOT_WIDTH + MS.paddle_width, PADDLE_POS_Y },
-            }
-          }
-          MS.next_laser_to_fire = (MS.next_laser_to_fire + 1) % MAX_LASER_COUNT
-        }
-      } 
+    should_exit := input()
+    if should_exit {
+      return
     }
 
     if !game_paused {
       accumulated_time += rl.GetFrameTime()
+
+      for accumulated_time >= DT {
+        tick()
+        accumulated_time -= DT
+      }
+
+      if (extra_life <= 0) {
+        extra_life += EXTRA_LIFE_SCORE
+        lives += 1
+      }
+
+      if (blocks_left == 0) {
+        level += 1
+        load_level(chapter, level)
+      }
     }
 
-    if (extra_life <= 0) {
-      extra_life += EXTRA_LIFE_SCORE
-      lives += 1
+    render()
+    free_all(context.temp_allocator)
+  }
+
+  rl.CloseAudioDevice()
+  rl.CloseWindow()
+}
+
+input :: proc() -> (should_exit: bool) {
+  if rl.IsKeyPressed(.ESCAPE) {
+    return true
+  }
+
+  mouse_dx := rl.GetMouseDelta().x * DT * MOUSE_SENSITIVITY
+  if abs(mouse_dx) > 0 {
+    MS.paddle_pos_x += mouse_dx
+  }
+
+  if rl.IsMouseButtonPressed(.LEFT) {
+    if MS.game_over {
+      restart_game()
     }
-
-    if (blocks_left == 0) {
-      level += 1
-      load_level(chapter, level)
+    else if MS.waiting_for_launch {
+      MS.balls[0].speed = MS.active_powerups[.Slow] ? SLOW_BALL_SPEED : NORMAL_BALL_SPEED
+      MS.waiting_for_launch = false
     }
-
-    previous_ball_pos := MS.balls[0].pos
-
-    for accumulated_time >= DT {
-			mouse_dx := rl.GetMouseDelta().x * DT * MOUSE_SENSITIVITY
-			if abs(mouse_dx) > 0 {
-				MS.paddle_pos_x += mouse_dx
-			}
-
-      if !MS.waiting_for_launch {
-        MS.balls[0].pos += MS.balls[0].dir * MS.balls[0].speed * DT
-
-        if MS.balls[0].pos.x + BALL_RADIUS > RIGHT_WALL_X {
-          MS.balls[0].pos.x = RIGHT_WALL_X - BALL_RADIUS
-          MS.balls[0].dir = reflect_ball(MS.balls[0].dir, {-1, 0})
+    else if MS.active_powerups[.Laser] {
+      if MS.lasers[MS.next_laser_to_fire] == {} {
+        MS.lasers[MS.next_laser_to_fire] = Laser {
+          origins = {
+            { MS.paddle_pos_x + LASER_SHOT_WIDTH,                   PADDLE_POS_Y },
+            { MS.paddle_pos_x - LASER_SHOT_WIDTH + MS.paddle_width, PADDLE_POS_Y },
+          }
         }
+        MS.next_laser_to_fire = (MS.next_laser_to_fire + 1) % MAX_LASER_COUNT
+      }
+    } 
+  }
 
-        if MS.balls[0].pos.x - BALL_RADIUS < LEFT_WALL_X {
-          MS.balls[0].pos.x = LEFT_WALL_X + BALL_RADIUS
-          MS.balls[0].dir = reflect_ball(MS.balls[0].dir, {1, 0})
+  return false
+}
+
+tick :: proc() {
+  paddle_rect := rl.Rectangle {MS.paddle_pos_x, PADDLE_POS_Y, MS.paddle_width, PADDLE_HEIGHT}
+
+  for i := len(MS.balls) - 1; i >= 0; i -= 1 {
+    ball := &MS.balls[i]
+    ball.prev_pos = ball.pos
+
+    // Move ball
+    if !MS.waiting_for_launch {
+      ball.pos += ball.dir * ball.speed * DT
+
+      if ball.pos.x + BALL_RADIUS > RIGHT_WALL_X {
+        ball.pos.x = RIGHT_WALL_X - BALL_RADIUS
+        ball.dir = reflect_ball(ball.dir, {-1, 0})
+      }
+
+      if ball.pos.x - BALL_RADIUS < LEFT_WALL_X {
+        ball.pos.x = LEFT_WALL_X + BALL_RADIUS
+        ball.dir = reflect_ball(ball.dir, {1, 0})
+      }
+
+      if ball.pos.y - BALL_RADIUS < TOP_WALL_Y {
+        ball.pos.y = TOP_WALL_Y + BALL_RADIUS
+        ball.dir = reflect_ball(ball.dir, {0, 1})
+      }
+
+      if ball.pos.y > SCREEN_SIZE_Y + BALL_RADIUS * 5 {
+        unordered_remove(&MS.balls, i)
+        switch len(MS.balls) {
+        case 1: {
+          MS.active_powerups[.Multiball] = false
         }
-
-        if MS.balls[0].pos.y - BALL_RADIUS < TOP_WALL_Y {
-          MS.balls[0].pos.y = TOP_WALL_Y + BALL_RADIUS
-          MS.balls[0].dir = reflect_ball(MS.balls[0].dir, {0, 1})
-        }
-
-        if MS.balls[0].pos.y > SCREEN_SIZE_Y + BALL_RADIUS * 5 {
+        case 0: {
           if lives == 0 {
             MS.game_over = true
             game_paused = true
             rl.PlaySound(game_over_sound)
-          } else {
+          }
+          else {
             lives -= 1
             reset_paddle()
           }
         }
-      }
-
-			// NOTE: Collision with paddle is a special snowflake that ignores incoming direction
-			// and chooses outgoing direction based on where the ball hits the paddle.
-			paddle_rect := rl.Rectangle {MS.paddle_pos_x, PADDLE_POS_Y, MS.paddle_width, PADDLE_HEIGHT}
-			if rl.CheckCollisionCircleRec(MS.balls[0].pos, BALL_RADIUS, paddle_rect) {
-        ball_hit_paddle()
-
-        if MS.active_powerups[.Catch] {
-          MS.balls[0].speed = 0
-          MS.waiting_for_launch = true
-        }
-
-				rl.PlaySound(hit_paddle_sound)
-			}
-
-			block_x_loop: for x in 0 ..< NUM_BLOCKS_X {
-				for y in 0 ..< NUM_BLOCKS_Y {
-					if blocks[x][y] == Block_Color.Empty {
-						continue
-					}
-
-					block_rect := calc_block_rect(x, y)
-
-					if rl.CheckCollisionCircleRec(MS.balls[0].pos, BALL_RADIUS, block_rect) {
-						collision_normal: rl.Vector2
-
-						// TODO: Resolve this so that we only ever collide once and with the correct edge
-						if previous_ball_pos.y < block_rect.y {
-							collision_normal += {0, -1}
-						} 
-            if previous_ball_pos.y > block_rect.y + block_rect.height {
-							collision_normal += {0, 1}
-						} 
-            if previous_ball_pos.x < block_rect.x {
-							collision_normal += {-1, 0}
-						} 
-            if previous_ball_pos.x > block_rect.x + block_rect.width {
-							collision_normal += {1, 0}
-						}
-
-						if block_exists(x + int(collision_normal.x), y) {
-							collision_normal.x = 0
-						}
-						if block_exists(x, y + int(collision_normal.y)) {
-							collision_normal.y = 0
-						}
-            if MS.active_powerups[.Pierce] && blocks[x][y] != Block_Color.Adamantium {
-              collision_normal = 0
-            }
-
-						if collision_normal != 0 {
-							MS.balls[0].dir = reflect_ball(MS.balls[0].dir, collision_normal)
-						}
-
-            damage_block_at_index(x, y)
-						break block_x_loop
-					}
-				}
-			}
-
-      for &laser in MS.lasers {
-        for &origin in laser.origins {
-          laser_hit_point := rl.Vector2 {
-            origin.x,
-            origin.y - LASER_SHOT_LENGTH
-          }
-          x, y, empty := block_at_point(laser_hit_point)
-          if !empty {
-            damage_block_at_index(x, y)
-            origin = {}
-          } else if laser_hit_point.y <= 0 {
-            origin = {}
-          } else {
-            origin.y -= LASER_SHOT_SPEED
-          }
-        }
-      }
-
-      for i := len(MS.falling_powerups) - 1; i >= 0; i -= 1 {
-        powerup := &MS.falling_powerups[i]
-        powerup.pos.y += POWERUP_SPEED * DT
-        powerup_rect := rl.Rectangle {
-          powerup.pos.x - POWERUP_SIZE, powerup.pos.y - POWERUP_SIZE,
-          POWERUP_SIZE*2, POWERUP_SIZE*2
-        }
-        if rl.CheckCollisionRecs(paddle_rect, powerup_rect) {
-          activate_powerup(powerup.type)
-          ordered_remove(&MS.falling_powerups, i)
-        } else if powerup_rect.y > SCREEN_SIZE_Y {
-          ordered_remove(&MS.falling_powerups, i)
-        }
-      }
-
-      if MS.active_powerups[.Barrier] && rl.CheckCollisionCircleRec(MS.balls[0].pos, BALL_RADIUS, BARRIER_RECT) {
-        MS.balls[0].dir = reflect_ball(MS.balls[0].dir, {0, -1})
-        MS.active_powerups[.Barrier] = false
-      }
-
-      if MS.active_powerups[.Pierce] {
-        time := rl.GetTime()
-        if (time > MS.next_ball_trail_tick_time) {
-          append(&MS.ball_trails, Ball_Trail {previous_ball_pos, BALL_TRAIL_STEP*(BALL_TRAIL_LENGTH-1)})
-          MS.next_ball_trail_tick_time = time + 0.01
-
-          for i := len(MS.ball_trails) - 1; i >= 0; i -= 1 {
-            trail := &MS.ball_trails[i]
-            trail.opacity -= BALL_TRAIL_STEP
-            if trail.opacity <= 0 {
-              ordered_remove(&MS.ball_trails, i)
-            } 
-          }
-        }
-      }
-
-      MS.paddle_pos_x = clamp(MS.paddle_pos_x, LEFT_WALL_X, RIGHT_WALL_X - MS.paddle_width)
-      if MS.waiting_for_launch { move_ball_to_paddle() }
-			accumulated_time -= DT
-		}
-
-		rl.BeginDrawing()
-		rl.ClearBackground(rl.BLACK)
-
-		camera := rl.Camera2D {
-			zoom = f32(rl.GetScreenHeight() / SCREEN_SIZE_Y),
-		}
-
-		rl.BeginMode2D(camera)
-
-    if MS.active_powerups[.Laser] {
-      for laser in MS.lasers {
-        for origin in laser.origins {
-          rect := rl.Rectangle {
-            origin.x - LASER_SHOT_WIDTH, origin.y - LASER_SHOT_LENGTH,
-            2*LASER_SHOT_WIDTH + 1, LASER_SHOT_LENGTH
-          }
-          rl.DrawRectangleRec(rect, rl.RED)
         }
       }
     }
 
-    if MS.active_powerups[.Barrier] {
-      barrier_color := rl.SKYBLUE
-      barrier_color.a = u8(math.cos(rl.GetTime()) * 64 + 128)
-      rl.DrawRectangleRec(BARRIER_RECT, barrier_color)
+    // NOTE: Snowflake physics for ball-paddle collison
+    if rl.CheckCollisionCircleRec(ball.pos, BALL_RADIUS, paddle_rect) {
+      ball_hit_paddle(i)
+
+      if MS.active_powerups[.Catch] {
+        ball.speed = 0
+        MS.waiting_for_launch = true
+      }
+
+      rl.PlaySound(hit_paddle_sound)
     }
 
-    draw_rect_w_outline({MS.paddle_pos_x, PADDLE_POS_Y, MS.paddle_width, PADDLE_HEIGHT}, paddle_color)
+    // Check for ball-block collision
+    block_x_loop: for x in 0 ..< NUM_BLOCKS_X {
+      for y in 0 ..< NUM_BLOCKS_Y {
+        if blocks[x][y] == Block_Color.Empty {
+          continue
+        }
 
-    render_ball(MS.balls[0].pos, 1.0)
+        block_rect := calc_block_rect(x, y)
+
+        if rl.CheckCollisionCircleRec(ball.pos, BALL_RADIUS, block_rect) {
+          collision_normal: rl.Vector2
+
+          // TODO: Resolve this so that we only ever collide once and with the correct edge
+          if ball.prev_pos.y < block_rect.y {
+
+
+            collision_normal += {0, -1}
+          } 
+          if ball.prev_pos.y > block_rect.y + block_rect.height {
+            collision_normal += {0, 1}
+          } 
+          if ball.prev_pos.x < block_rect.x {
+            collision_normal += {-1, 0}
+          } 
+          if ball.prev_pos.x > block_rect.x + block_rect.width {
+            collision_normal += {1, 0}
+          }
+
+          if block_exists(x + int(collision_normal.x), y) {
+            collision_normal.x = 0
+          }
+          if block_exists(x, y + int(collision_normal.y)) {
+            collision_normal.y = 0
+          }
+          if MS.active_powerups[.Pierce] && blocks[x][y] != Block_Color.Adamantium {
+            collision_normal = 0
+          }
+
+          if collision_normal != 0 {
+            ball.dir = reflect_ball(ball.dir, collision_normal)
+          }
+
+          damage_block_at_index(x, y)
+          break block_x_loop
+        }
+      }
+    }
+
+    if MS.active_powerups[.Barrier] && rl.CheckCollisionCircleRec(ball.pos, BALL_RADIUS, BARRIER_RECT) {
+      ball.dir = reflect_ball(ball.dir, {0, -1})
+      MS.active_powerups[.Barrier] = false
+    }
 
     if MS.active_powerups[.Pierce] {
-      for &ball_trail in MS.ball_trails {
-        render_ball(ball_trail.pos, ball_trail.opacity)
+      time := rl.GetTime()
+      if (time > MS.next_ball_trail_tick_time) {
+        append(&MS.ball_trails, Ball_Trail {ball.prev_pos, BALL_TRAIL_STEP*(BALL_TRAIL_LENGTH-1)})
+        MS.next_ball_trail_tick_time = time + 0.01
+
+        for i := len(MS.ball_trails) - 1; i >= 0; i -= 1 {
+          trail := &MS.ball_trails[i]
+          trail.opacity -= BALL_TRAIL_STEP
+          if trail.opacity <= 0 {
+            unordered_remove(&MS.ball_trails, i)
+          } 
+        }
       }
     }
+  }
 
-		for x in 0 ..< NUM_BLOCKS_X {
-			for y in 0 ..< NUM_BLOCKS_Y {
-				if blocks[x][y] == Block_Color.Empty {
-					continue
-				}
+  // Move falling powerups and check if picked up
+  for i := len(MS.falling_powerups) - 1; i >= 0; i -= 1 {
+    powerup := &MS.falling_powerups[i]
+    powerup.pos.y += POWERUP_SPEED * DT
+    powerup_rect := rl.Rectangle {
+      powerup.pos.x - POWERUP_SIZE, powerup.pos.y - POWERUP_SIZE,
+      POWERUP_SIZE*2, POWERUP_SIZE*2
+    }
+    if rl.CheckCollisionRecs(paddle_rect, powerup_rect) {
+      activate_powerup(powerup.type)
+      unordered_remove(&MS.falling_powerups, i)
+    } else if powerup_rect.y > SCREEN_SIZE_Y {
+      unordered_remove(&MS.falling_powerups, i)
+    }
+  }
 
-				block_rect := calc_block_rect(x, y)
-				block_color := block_color_values[blocks[x][y]]
-        draw_rect_w_outline(block_rect, block_color)
-			}
-		}
+  for &laser in MS.lasers {
+    for &origin in laser.origins {
+      laser_hit_point := rl.Vector2 {
+        origin.x,
+        origin.y - LASER_SHOT_LENGTH
+      }
+      x, y, empty := block_at_point(laser_hit_point)
+      if !empty {
+        damage_block_at_index(x, y)
+        origin = {}
+      }
+      else if laser_hit_point.y <= 0 {
+        origin = {}
+      }
+      else {
+        origin.y -= LASER_SHOT_SPEED
+      }
+    }
+  }
 
-		rl.DrawRectangleRec({0,            0, WALL_THICKNESS, SCREEN_SIZE_Y},  rl.GRAY)
-		rl.DrawRectangleRec({RIGHT_WALL_X, 0, WALL_THICKNESS, SCREEN_SIZE_Y},  rl.GRAY)
-		rl.DrawRectangleRec({0,            0, SCREEN_SIZE_X,  WALL_THICKNESS}, rl.GRAY)
+  MS.paddle_pos_x = clamp(MS.paddle_pos_x, LEFT_WALL_X, RIGHT_WALL_X - MS.paddle_width)
+  if MS.waiting_for_launch { move_ball_to_paddle() }
+}
 
-    for powerup in MS.falling_powerups {
-      powerup_rect := rl.Rectangle {
-        powerup.pos.x - POWERUP_SIZE, powerup.pos.y - POWERUP_SIZE,
-        POWERUP_SIZE*2, POWERUP_SIZE*2
+render :: proc() {
+  rl.BeginDrawing()
+  rl.ClearBackground(rl.BLACK)
+
+  camera := rl.Camera2D {
+    zoom = f32(rl.GetScreenHeight() / SCREEN_SIZE_Y),
+  }
+
+  rl.BeginMode2D(camera)
+
+  if MS.active_powerups[.Laser] {
+    for laser in MS.lasers {
+      for origin in laser.origins {
+        rect := rl.Rectangle {
+          origin.x - LASER_SHOT_WIDTH, origin.y - LASER_SHOT_LENGTH,
+          2*LASER_SHOT_WIDTH + 1, LASER_SHOT_LENGTH
+        }
+        rl.DrawRectangleRec(rect, rl.RED)
+      }
+    }
+  }
+
+  if MS.active_powerups[.Barrier] {
+    barrier_color := rl.SKYBLUE
+    barrier_color.a = u8(math.cos(rl.GetTime()) * 64 + 128)
+    rl.DrawRectangleRec(BARRIER_RECT, barrier_color)
+  }
+
+  draw_rect_w_outline({MS.paddle_pos_x, PADDLE_POS_Y, MS.paddle_width, PADDLE_HEIGHT}, paddle_color)
+
+  for ball in MS.balls {
+    render_ball(ball.pos, 1.0)
+  }
+
+  if MS.active_powerups[.Pierce] {
+    for &ball_trail in MS.ball_trails {
+      render_ball(ball_trail.pos, ball_trail.opacity)
+    }
+  }
+
+  for x in 0 ..< NUM_BLOCKS_X {
+    for y in 0 ..< NUM_BLOCKS_Y {
+      if blocks[x][y] == Block_Color.Empty {
+        continue
       }
 
-      draw_rect_w_outline(powerup_rect, rl.BEIGE)
-      x := i32(powerup.pos.x - POWERUP_SIZE + 2)
-      y := i32(powerup.pos.y - POWERUP_SIZE + 1)
-      str := char_to_cstring(powerup_letter[powerup.type])
-      if powerup.type == .Slow && MS.active_powerups[.Slow] {
-        str = "F"
-      }
-      rl.DrawText(str, x+1, y+1, 2, rl.BLACK)
-      rl.DrawText(str, x, y, 2, rl.WHITE)
+      block_rect := calc_block_rect(x, y)
+      block_color := block_color_values[blocks[x][y]]
+      draw_rect_w_outline(block_rect, block_color)
+    }
+  }
+
+  rl.DrawRectangleRec({0,            0, WALL_THICKNESS, SCREEN_SIZE_Y},  rl.GRAY)
+  rl.DrawRectangleRec({RIGHT_WALL_X, 0, WALL_THICKNESS, SCREEN_SIZE_Y},  rl.GRAY)
+  rl.DrawRectangleRec({0,            0, SCREEN_SIZE_X,  WALL_THICKNESS}, rl.GRAY)
+
+  for powerup in MS.falling_powerups {
+    powerup_rect := rl.Rectangle {
+      powerup.pos.x - POWERUP_SIZE, powerup.pos.y - POWERUP_SIZE,
+      POWERUP_SIZE*2, POWERUP_SIZE*2
     }
 
-		left_offset: i32 = RIGHT_WALL_X + 20
-		top_offset: i32 = 20
-		TITLE_SIZE :: 20
-    VALUE_SIZE :: 15
+    draw_rect_w_outline(powerup_rect, rl.BEIGE)
+    x := i32(powerup.pos.x - POWERUP_SIZE + 2)
+    y := i32(powerup.pos.y - POWERUP_SIZE + 1)
+    str := char_to_cstring(powerup_letter[powerup.type])
+    if powerup.type == .Slow && MS.active_powerups[.Slow] {
+      str = "F"
+    }
+    rl.DrawText(str, x+1, y+1, 2, rl.BLACK)
+    rl.DrawText(str, x, y, 2, rl.WHITE)
+  }
 
-		rl.DrawText("SCORE", left_offset, top_offset, TITLE_SIZE, rl.WHITE)
-		top_offset += 20
-		score_text := fmt.ctprint(score)
-		rl.DrawText(score_text, left_offset, top_offset, VALUE_SIZE, rl.WHITE)
-		top_offset += 40
+  left_offset: i32 = RIGHT_WALL_X + 20
+  top_offset: i32 = 20
+  TITLE_SIZE :: 20
+  VALUE_SIZE :: 15
 
-		rl.DrawText("EXTRA", left_offset, top_offset, TITLE_SIZE, rl.WHITE)
-		top_offset += 20
-		extra_text := fmt.ctprint(extra_life)
-		rl.DrawText(extra_text, left_offset, top_offset, VALUE_SIZE, rl.WHITE)
-		top_offset += 40
+  rl.DrawText("SCORE", left_offset, top_offset, TITLE_SIZE, rl.WHITE)
+  top_offset += 20
+  score_text := fmt.ctprint(score)
+  rl.DrawText(score_text, left_offset, top_offset, VALUE_SIZE, rl.WHITE)
+  top_offset += 40
 
-		rl.DrawText("LIVES", left_offset, top_offset, TITLE_SIZE, rl.WHITE)
-		top_offset += 20
-		lives_text := fmt.ctprint(lives)
-		rl.DrawText(lives_text, left_offset, top_offset, VALUE_SIZE, rl.WHITE)
-		top_offset += 40
+  rl.DrawText("EXTRA", left_offset, top_offset, TITLE_SIZE, rl.WHITE)
+  top_offset += 20
+  extra_text := fmt.ctprint(extra_life)
+  rl.DrawText(extra_text, left_offset, top_offset, VALUE_SIZE, rl.WHITE)
+  top_offset += 40
 
-		rl.DrawText("LEVEL", left_offset, top_offset, TITLE_SIZE, rl.WHITE)
-		top_offset += 20
-		level_text := fmt.ctprintf("%d-%d", chapter, level)
-		rl.DrawText(level_text, left_offset, top_offset, VALUE_SIZE, rl.WHITE)
-		top_offset += 40
+  rl.DrawText("LIVES", left_offset, top_offset, TITLE_SIZE, rl.WHITE)
+  top_offset += 20
+  lives_text := fmt.ctprint(lives)
+  rl.DrawText(lives_text, left_offset, top_offset, VALUE_SIZE, rl.WHITE)
+  top_offset += 40
 
-		if MS.waiting_for_launch {
-			start_text := fmt.ctprint("Start: Left Click")
-			start_text_width := rl.MeasureText(start_text, 15)
-			rl.DrawText(
-				start_text,
-				LEFT_WALL_X + PLAY_AREA_WIDTH / 2 - start_text_width / 2,
-				BALL_START_Y - 30,
-				15,
-				rl.WHITE,
-			)
-		}
+  rl.DrawText("LEVEL", left_offset, top_offset, TITLE_SIZE, rl.WHITE)
+  top_offset += 20
+  level_text := fmt.ctprintf("%d-%d", chapter, level)
+  rl.DrawText(level_text, left_offset, top_offset, VALUE_SIZE, rl.WHITE)
+  top_offset += 40
 
-		if MS.game_over {
-			game_over_text := fmt.ctprintf("Score: %v. Reset: Left Click", score)
-			game_over_text_width := rl.MeasureText(game_over_text, 15)
-			rl.DrawText(
-				game_over_text,
-				LEFT_WALL_X + PLAY_AREA_WIDTH / 2 - game_over_text_width / 2,
-				BALL_START_Y - 30,
-				15,
-				rl.WHITE,
-			)
-		}
+  if MS.waiting_for_launch {
+    start_text := fmt.ctprint("Start: Left Click")
+    start_text_width := rl.MeasureText(start_text, 15)
+    rl.DrawText(
+      start_text,
+      LEFT_WALL_X + PLAY_AREA_WIDTH / 2 - start_text_width / 2,
+      BALL_START_Y - 30,
+      15,
+      rl.WHITE,
+    )
+  }
 
-		rl.EndMode2D()
-		rl.EndDrawing()
+  if MS.game_over {
+    game_over_text := fmt.ctprintf("Score: %v. Reset: Left Click", score)
+    game_over_text_width := rl.MeasureText(game_over_text, 15)
+    rl.DrawText(
+      game_over_text,
+      LEFT_WALL_X + PLAY_AREA_WIDTH / 2 - game_over_text_width / 2,
+      BALL_START_Y - 30,
+      15,
+      rl.WHITE,
+    )
+  }
 
-		free_all(context.temp_allocator)
-	}
-
-	rl.CloseAudioDevice()
-	rl.CloseWindow()
+  rl.EndMode2D()
+  rl.EndDrawing()
 }
