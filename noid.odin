@@ -126,10 +126,11 @@ Ball_Trail :: struct {
 }
 
 Ball :: struct {
-  pos, prev_pos: rl.Vector2,
+  pos: rl.Vector2,
+  prev_pos: rl.Vector2,
   dir: rl.Vector2,
   speed: f32,
-  last_hit_offset: f32
+  last_hit_offset: f32,
 }
 
 MegaStruct :: struct {
@@ -459,6 +460,15 @@ render_ball :: proc(pos: rl.Vector2, opacity: f32) {
   rl.DrawRing(pos, BALL_RADIUS - 1, BALL_RADIUS, -225, -45, 4, lighter_color)
 }
 
+lerp_color :: proc(a, b: rl.Color, t: f64) -> rl.Color {
+  return rl.Color{
+    u8(f64(a.r) + (f64(b.r) - f64(a.r)) * t),
+    u8(f64(a.g) + (f64(b.g) - f64(a.g)) * t),
+    u8(f64(a.b) + (f64(b.b) - f64(a.b)) * t),
+    u8(f64(a.a) + (f64(b.a) - f64(a.a)) * t),
+  }
+}
+
 main :: proc() {
 	rl.SetConfigFlags({.VSYNC_HINT})
 	rl.InitWindow(SCREEN_SIZE_X * 2, SCREEN_SIZE_Y * 2, "noid")
@@ -510,16 +520,18 @@ input :: proc() -> (should_exit: bool) {
     return true
   }
 
-  mouse_dx := rl.GetMouseDelta().x * DT * MOUSE_SENSITIVITY
-  if abs(mouse_dx) > 0 {
-    MS.paddle_pos_x += mouse_dx
+  if !MS.game_over {
+    mouse_dx := rl.GetMouseDelta().x * DT * MOUSE_SENSITIVITY
+    if abs(mouse_dx) > 0 {
+      MS.paddle_pos_x += mouse_dx
+    }
   }
 
   if rl.IsMouseButtonPressed(.LEFT) {
     if MS.game_over {
       restart_game()
     }
-    else if MS.waiting_for_launch {
+    else if MS.waiting_for_launch { // FIXME: Per-ball logic for Multiball x Catch
       MS.balls[0].speed = MS.active_powerups[.Slow] ? SLOW_BALL_SPEED : NORMAL_BALL_SPEED
       MS.waiting_for_launch = false
     }
@@ -547,7 +559,7 @@ tick :: proc() {
     ball.prev_pos = ball.pos
 
     // Move ball
-    if !MS.waiting_for_launch {
+    if !MS.waiting_for_launch { // FIXME: Per-ball logic for Multiball x Catch
       ball.pos += ball.dir * ball.speed * DT
 
       if ball.pos.x + BALL_RADIUS > RIGHT_WALL_X {
@@ -566,6 +578,7 @@ tick :: proc() {
       }
 
       if ball.pos.y > SCREEN_SIZE_Y + BALL_RADIUS * 5 {
+        // NOTE: This will end up swapping the last ball into slot 0
         unordered_remove(&MS.balls, i)
         switch len(MS.balls) {
         case 1: {
@@ -592,7 +605,7 @@ tick :: proc() {
 
       if MS.active_powerups[.Catch] {
         ball.speed = 0
-        MS.waiting_for_launch = true
+        MS.waiting_for_launch = true // FIXME: Per-ball logic for Multiball x Catch
       }
 
       rl.PlaySound(hit_paddle_sound)
@@ -705,7 +718,7 @@ tick :: proc() {
   }
 
   MS.paddle_pos_x = clamp(MS.paddle_pos_x, LEFT_WALL_X, RIGHT_WALL_X - MS.paddle_width)
-  if MS.waiting_for_launch { move_ball_to_paddle() }
+  if MS.waiting_for_launch { move_ball_to_paddle() } // FIXME: Do this per-ball
 }
 
 render :: proc() {
@@ -725,14 +738,26 @@ render :: proc() {
           origin.x - LASER_SHOT_WIDTH, origin.y - LASER_SHOT_LENGTH,
           2*LASER_SHOT_WIDTH + 1, LASER_SHOT_LENGTH
         }
-        rl.DrawRectangleRec(rect, rl.RED)
+        laser_color := rl.RED
+        t := rl.GetTime()
+        flicker := math.cos(t * 17.3) * 0.5 + math.cos(t * 43.7) * 0.3 + math.cos(t * 91.1) * 0.2
+        glow := math.clamp(flicker * 0.5 + 0.5, 0.8, 1.0)
+        glow = math.pow(glow, 2)
+        alpha := u8(glow * 255)
+        laser_color.a = alpha
+        rl.DrawRectangleRec(rect, laser_color)
       }
     }
   }
 
   if MS.active_powerups[.Barrier] {
-    barrier_color := rl.SKYBLUE
-    barrier_color.a = u8(math.cos(rl.GetTime()) * 64 + 128)
+    t := rl.GetTime()
+    flicker := math.cos(t * 17.3) * 0.5 + math.cos(t * 43.7) * 0.3 + math.cos(t * 91.1) * 0.2
+    glow := math.clamp(flicker * 0.5 + 0.5, 0.6, 0.8)
+    glow = math.pow(glow, 3)
+    alpha := u8(glow * 255)
+    barrier_color := lerp_color(rl.DARKBLUE, rl.WHITE, glow)
+    barrier_color.a = alpha
     rl.DrawRectangleRec(BARRIER_RECT, barrier_color)
   }
 
@@ -777,8 +802,8 @@ render :: proc() {
     if powerup.type == .Slow && MS.active_powerups[.Slow] {
       str = "F"
     }
-    rl.DrawText(str, x+1, y+1, 2, rl.BLACK)
-    rl.DrawText(str, x, y, 2, rl.WHITE)
+    rl.DrawText(str, x + 1, y + 1, 2, rl.BLACK)
+    rl.DrawText(str, x,     y,     2, rl.WHITE)
   }
 
   left_offset: i32 = RIGHT_WALL_X + 20
@@ -810,25 +835,13 @@ render :: proc() {
   rl.DrawText(level_text, left_offset, top_offset, VALUE_SIZE, rl.WHITE)
   top_offset += 40
 
-  if MS.waiting_for_launch {
-    start_text := fmt.ctprint("Start: Left Click")
-    start_text_width := rl.MeasureText(start_text, 15)
-    rl.DrawText(
-      start_text,
-      LEFT_WALL_X + PLAY_AREA_WIDTH / 2 - start_text_width / 2,
-      BALL_START_Y - 30,
-      15,
-      rl.WHITE,
-    )
-  }
-
   if MS.game_over {
     game_over_text := fmt.ctprintf("Score: %v. Reset: Left Click", score)
     game_over_text_width := rl.MeasureText(game_over_text, 15)
     rl.DrawText(
       game_over_text,
-      LEFT_WALL_X + PLAY_AREA_WIDTH / 2 - game_over_text_width / 2,
-      BALL_START_Y - 30,
+      LEFT_WALL_X + PLAY_AREA_WIDTH/2 - game_over_text_width/2,
+      SCREEN_SIZE_Y * 2/3,
       15,
       rl.WHITE,
     )
