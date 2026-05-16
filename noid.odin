@@ -5,6 +5,7 @@ import "core:math"
 import "core:math/linalg"
 import "core:math/rand"
 import "core:os"
+import "core:reflect"
 import "core:strings"
 import rl "vendor:raylib"
 
@@ -21,7 +22,7 @@ PADDLE_HEIGHT :: 6
 PADDLE_POS_Y :: SCREEN_SIZE_Y - 50
 NORMAL_BALL_SPEED :: 250
 SLOW_BALL_SPEED :: NORMAL_BALL_SPEED * 0.7
-DEFAULT_BALL_OFFSET_X :: DEFAULT_PADDLE_WIDTH * 0.7
+DEFAULT_BALL_OFFSET :: 0.7
 BALL_RADIUS :: 4
 BALL_START_Y :: SCREEN_SIZE_Y / 0.7
 NUM_BLOCKS_X :: 10
@@ -91,7 +92,7 @@ block_color_score := [Block_Color]int {
 Powerup_Type :: enum u8 {
   Barrier,
   Catch,
-  Duplicate,
+  Multiball,
   Enlarge,
   Laser,
   Slow,
@@ -101,15 +102,14 @@ Powerup_Type :: enum u8 {
 Powerup :: struct {
   type: Powerup_Type,
   pos: rl.Vector2,
-  color: rl.Color,
 }
 
 powerup_letter := [Powerup_Type]u8 {
   .Barrier = 'B',
   .Catch = 'C',
-  .Duplicate = 'D',
   .Enlarge = 'E',
   .Laser = 'L',
+  .Multiball = 'M',
   .Slow = 'S',
   .Pierce = 'P',
 }
@@ -123,12 +123,19 @@ Ball_Trail :: struct {
   opacity: f32,
 }
 
+Ball :: struct {
+  pos: rl.Vector2,
+  dir: rl.Vector2,
+  speed: f32,
+  last_hit_offset: f32
+}
+
 MegaStruct :: struct {
   waiting_for_launch: bool,
   game_over: bool,
   paddle_width: f32,
   paddle_pos_x: f32,
-  ball_speed: f32,
+  balls: [dynamic; 4]Ball,
   falling_powerups: [dynamic; 8]Powerup,
   active_powerups: [Powerup_Type]bool,
   lasers: [MAX_LASER_COUNT]Laser,
@@ -140,17 +147,12 @@ MegaStruct :: struct {
 MS := MegaStruct {}
 
 blocks: [NUM_BLOCKS_X][NUM_BLOCKS_Y]Block_Color
-ball_pos: rl.Vector2
-ball_dir: rl.Vector2
-previous_ball_speed: f32
-ball_offset_x: f32
 game_paused: bool
 blocks_left: int
 score: int
 extra_life: int
 lives: int
 accumulated_time: f32
-previous_ball_pos: rl.Vector2
 chapter: int = 1
 level: int = 1
 paddle_color: rl.Color
@@ -159,9 +161,10 @@ hit_block_sound: rl.Sound
 hit_paddle_sound: rl.Sound
 game_over_sound: rl.Sound
 
-move_ball_to_paddle :: proc() {
-  ball_pos = {
-    MS.paddle_pos_x + ball_offset_x,
+move_ball_to_paddle :: proc(default: bool = false) {
+  hit_pos_x := default ? DEFAULT_BALL_OFFSET : MS.balls[0].last_hit_offset
+  MS.balls[0].pos = {
+    MS.paddle_pos_x + hit_pos_x * MS.paddle_width,
     PADDLE_POS_Y - BALL_RADIUS - 1,
   }
 }
@@ -170,26 +173,25 @@ ball_hit_paddle :: proc() {
   hit_pos_x := linalg.unlerp(
     MS.paddle_pos_x,
     MS.paddle_pos_x + MS.paddle_width,
-    ball_pos.x,
+    MS.balls[0].pos.x,
   )
-  ball_offset_x = MS.paddle_width * hit_pos_x
-  ball_dir = linalg.normalize(rl.Vector2{(hit_pos_x - 0.5) * 3.0, -1})
+  MS.balls[0].last_hit_offset = hit_pos_x
+  MS.balls[0].dir = linalg.normalize(rl.Vector2{(hit_pos_x - 0.5) * 3.0, -1})
 }
 
 reset_paddle :: proc() {
   MS.waiting_for_launch = true
   paddle_color = DEFAULT_PADDLE_COLOR
-  ball_color = DEFAULT_BALL_COLOR
-  previous_ball_speed = NORMAL_BALL_SPEED
-  MS.ball_speed = 0
-  ball_offset_x = DEFAULT_BALL_OFFSET_X
   MS.paddle_width = DEFAULT_PADDLE_WIDTH
 	MS.paddle_pos_x = LEFT_WALL_X + PLAY_AREA_WIDTH / 2 - MS.paddle_width / 2
-  clear(&MS.falling_powerups)
   MS.active_powerups = {}
   MS.lasers = {}
-  move_ball_to_paddle()
-  previous_ball_pos = ball_pos
+  clear(&MS.falling_powerups)
+  clear(&MS.ball_trails)
+  clear(&MS.balls)
+  append(&MS.balls, Ball {})
+  ball_color = DEFAULT_BALL_COLOR
+  move_ball_to_paddle(default = true)
   ball_hit_paddle()
 }
 
@@ -226,7 +228,6 @@ load_level :: proc(new_chapter, new_level: int) {
 	}
 
 	reset_paddle()
-  MS.falling_powerups = {}
 }
 
 restart_game :: proc() {
@@ -271,13 +272,9 @@ char_to_cstring :: proc(ch: u8) -> cstring {
   return fmt.ctprintf("%c", ch)
 }
 
-reflect :: proc(dir, normal: rl.Vector2) -> rl.Vector2 {
+reflect_ball :: proc(dir, normal: rl.Vector2) -> rl.Vector2 {
 	new_direction := linalg.reflect(dir, linalg.normalize(normal))
 	return linalg.normalize(new_direction)
-}
-
-negate :: proc(dir: rl.Vector2) -> rl.Vector2 {
-	return dir * -1
 }
 
 calc_block_rect :: proc(x, y: int) -> rl.Rectangle {
@@ -314,9 +311,8 @@ draw_rect_w_outline :: proc(rect: rl.Rectangle, color: rl.Color) {
 }
 
 spawn_powerup :: proc(x, y: f32) {
-  options : []u8 = {0, 1, 3, 4, 5, 6}
-  type := Powerup_Type(rand.choice(options))
-  append(&MS.falling_powerups, Powerup {type, rl.Vector2 {x, y}, rl.BEIGE})
+  type := Powerup_Type(rand.choice(reflect.enum_field_values(Powerup_Type)))
+  append(&MS.falling_powerups, Powerup {type, rl.Vector2 {x, y}})
 }
 
 activate_powerup :: proc(type: Powerup_Type) {
@@ -330,35 +326,38 @@ activate_powerup :: proc(type: Powerup_Type) {
     if MS.active_powerups[.Catch] {
       paddle_color = DEFAULT_PADDLE_COLOR
       MS.waiting_for_launch = false
-      MS.ball_speed = previous_ball_speed
+      MS.balls[0].speed = MS.active_powerups[.Slow] ? SLOW_BALL_SPEED : NORMAL_BALL_SPEED
       MS.active_powerups[.Catch] = false
     }
   }
   case .Catch: {
     if MS.active_powerups[.Pierce] {
-      MS.active_powerups[.Pierce] = false
+      clear(&MS.ball_trails)
       ball_color = DEFAULT_BALL_COLOR
+      MS.active_powerups[.Pierce] = false
     }
     if MS.active_powerups[.Laser] {
       MS.active_powerups[.Laser] = false
       MS.lasers = {}
     }
-    paddle_color = rl.DARKGREEN
     if MS.active_powerups[.Enlarge] {
       MS.paddle_width = DEFAULT_PADDLE_WIDTH
       MS.paddle_pos_x += MS.paddle_width * (1 - 1/1.5)
       MS.active_powerups[.Enlarge] = false
     }
+    paddle_color = rl.DARKGREEN
   }
   case .Slow: {
     if MS.active_powerups[.Pierce] {
+      clear(&MS.ball_trails)
       MS.active_powerups[.Pierce] = false
     }
     if MS.active_powerups[.Slow] {
-      MS.ball_speed = NORMAL_BALL_SPEED
+      MS.balls[0].speed = NORMAL_BALL_SPEED
       ball_color = DEFAULT_BALL_COLOR
+      MS.active_powerups[.Slow] = false
     } else {
-      MS.ball_speed = SLOW_BALL_SPEED
+      MS.balls[0].speed = SLOW_BALL_SPEED
       ball_color = rl.GOLD
     }
   }
@@ -367,28 +366,31 @@ activate_powerup :: proc(type: Powerup_Type) {
     paddle_color = rl.MAROON
     if MS.active_powerups[.Catch] {
       MS.waiting_for_launch = false
-      MS.ball_speed = previous_ball_speed
+      MS.balls[0].speed = MS.active_powerups[.Slow] ? SLOW_BALL_SPEED : NORMAL_BALL_SPEED
       MS.active_powerups[.Catch] = false
     }
     if MS.active_powerups[.Pierce] {
+      clear(&MS.ball_trails)
+      ball_color = DEFAULT_BALL_COLOR
       MS.active_powerups[.Pierce] = false
     }
   }
   case .Pierce: {
     ball_color = rl.GREEN
     if MS.active_powerups[.Slow] {
-      MS.ball_speed = NORMAL_BALL_SPEED
+      MS.balls[0].speed = NORMAL_BALL_SPEED
       MS.active_powerups[.Slow] = false
     }
     if MS.active_powerups[.Catch] {
       MS.waiting_for_launch = false
-      MS.ball_speed = previous_ball_speed
+      paddle_color = DEFAULT_PADDLE_COLOR
+      MS.balls[0].speed = MS.active_powerups[.Slow] ? SLOW_BALL_SPEED : NORMAL_BALL_SPEED
       MS.active_powerups[.Catch] = false
     }
     if MS.active_powerups[.Laser] {
+      MS.lasers = {}
       paddle_color = DEFAULT_PADDLE_COLOR
       MS.active_powerups[.Laser] = false
-      MS.lasers = {}
     }
   }
   }
@@ -462,7 +464,7 @@ main :: proc() {
         restart_game()
       }
       else if MS.waiting_for_launch {
-        MS.ball_speed = MS.active_powerups[.Slow] ? SLOW_BALL_SPEED : NORMAL_BALL_SPEED
+        MS.balls[0].speed = MS.active_powerups[.Slow] ? SLOW_BALL_SPEED : NORMAL_BALL_SPEED
         MS.waiting_for_launch = false
       }
       else if MS.active_powerups[.Laser] {
@@ -492,33 +494,33 @@ main :: proc() {
       load_level(chapter, level)
     }
 
+    previous_ball_pos := MS.balls[0].pos
+
     for accumulated_time >= DT {
 			mouse_dx := rl.GetMouseDelta().x * DT * MOUSE_SENSITIVITY
 			if abs(mouse_dx) > 0 {
 				MS.paddle_pos_x += mouse_dx
 			}
 
-			previous_ball_pos = ball_pos
-
       if !MS.waiting_for_launch {
-        ball_pos += ball_dir * MS.ball_speed * DT
+        MS.balls[0].pos += MS.balls[0].dir * MS.balls[0].speed * DT
 
-        if ball_pos.x + BALL_RADIUS > RIGHT_WALL_X {
-          ball_pos.x = RIGHT_WALL_X - BALL_RADIUS
-          ball_dir = reflect(ball_dir, {-1, 0})
+        if MS.balls[0].pos.x + BALL_RADIUS > RIGHT_WALL_X {
+          MS.balls[0].pos.x = RIGHT_WALL_X - BALL_RADIUS
+          MS.balls[0].dir = reflect_ball(MS.balls[0].dir, {-1, 0})
         }
 
-        if ball_pos.x - BALL_RADIUS < LEFT_WALL_X {
-          ball_pos.x = LEFT_WALL_X + BALL_RADIUS
-          ball_dir = reflect(ball_dir, {1, 0})
+        if MS.balls[0].pos.x - BALL_RADIUS < LEFT_WALL_X {
+          MS.balls[0].pos.x = LEFT_WALL_X + BALL_RADIUS
+          MS.balls[0].dir = reflect_ball(MS.balls[0].dir, {1, 0})
         }
 
-        if ball_pos.y - BALL_RADIUS < TOP_WALL_Y {
-          ball_pos.y = TOP_WALL_Y + BALL_RADIUS
-          ball_dir = reflect(ball_dir, {0, 1})
+        if MS.balls[0].pos.y - BALL_RADIUS < TOP_WALL_Y {
+          MS.balls[0].pos.y = TOP_WALL_Y + BALL_RADIUS
+          MS.balls[0].dir = reflect_ball(MS.balls[0].dir, {0, 1})
         }
 
-        if ball_pos.y > SCREEN_SIZE_Y + BALL_RADIUS * 5 {
+        if MS.balls[0].pos.y > SCREEN_SIZE_Y + BALL_RADIUS * 5 {
           if lives == 0 {
             MS.game_over = true
             game_paused = true
@@ -533,12 +535,11 @@ main :: proc() {
 			// NOTE: Collision with paddle is a special snowflake that ignores incoming direction
 			// and chooses outgoing direction based on where the ball hits the paddle.
 			paddle_rect := rl.Rectangle {MS.paddle_pos_x, PADDLE_POS_Y, MS.paddle_width, PADDLE_HEIGHT}
-			if rl.CheckCollisionCircleRec(ball_pos, BALL_RADIUS, paddle_rect) {
+			if rl.CheckCollisionCircleRec(MS.balls[0].pos, BALL_RADIUS, paddle_rect) {
         ball_hit_paddle()
 
         if MS.active_powerups[.Catch] {
-          previous_ball_speed = MS.ball_speed
-          MS.ball_speed = 0
+          MS.balls[0].speed = 0
           MS.waiting_for_launch = true
         }
 
@@ -553,7 +554,7 @@ main :: proc() {
 
 					block_rect := calc_block_rect(x, y)
 
-					if rl.CheckCollisionCircleRec(ball_pos, BALL_RADIUS, block_rect) {
+					if rl.CheckCollisionCircleRec(MS.balls[0].pos, BALL_RADIUS, block_rect) {
 						collision_normal: rl.Vector2
 
 						// TODO: Resolve this so that we only ever collide once and with the correct edge
@@ -581,7 +582,7 @@ main :: proc() {
             }
 
 						if collision_normal != 0 {
-							ball_dir = reflect(ball_dir, collision_normal)
+							MS.balls[0].dir = reflect_ball(MS.balls[0].dir, collision_normal)
 						}
 
             damage_block_at_index(x, y)
@@ -623,8 +624,8 @@ main :: proc() {
         }
       }
 
-      if MS.active_powerups[.Barrier] && rl.CheckCollisionCircleRec(ball_pos, BALL_RADIUS, BARRIER_RECT) {
-        ball_dir = reflect(ball_dir, {0, -1})
+      if MS.active_powerups[.Barrier] && rl.CheckCollisionCircleRec(MS.balls[0].pos, BALL_RADIUS, BARRIER_RECT) {
+        MS.balls[0].dir = reflect_ball(MS.balls[0].dir, {0, -1})
         MS.active_powerups[.Barrier] = false
       }
 
@@ -678,7 +679,7 @@ main :: proc() {
 
     draw_rect_w_outline({MS.paddle_pos_x, PADDLE_POS_Y, MS.paddle_width, PADDLE_HEIGHT}, paddle_color)
 
-    render_ball(ball_pos, 1.0)
+    render_ball(MS.balls[0].pos, 1.0)
 
     if MS.active_powerups[.Pierce] {
       for &ball_trail in MS.ball_trails {
@@ -708,7 +709,7 @@ main :: proc() {
         POWERUP_SIZE*2, POWERUP_SIZE*2
       }
 
-      draw_rect_w_outline(powerup_rect, powerup.color)
+      draw_rect_w_outline(powerup_rect, rl.BEIGE)
       x := i32(powerup.pos.x - POWERUP_SIZE + 2)
       y := i32(powerup.pos.y - POWERUP_SIZE + 1)
       str := char_to_cstring(powerup_letter[powerup.type])
